@@ -85,7 +85,7 @@ Line 11: ⚠️ Not financial advice. Educational only.
 Be direct. No fluff. Traders need fast answers."""
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=600,
         messages=[{"role": "user", "content": prompt}]
     )
