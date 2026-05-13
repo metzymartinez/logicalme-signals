@@ -82,16 +82,24 @@ def parse_tradingview_message(raw_body: str) -> dict:
         if isinstance(data, dict):
             # Normalize field names
             normalized = {
-                "signal_type": str(data.get("signal", data.get("signal_type", "UNKNOWN"))).upper(),
-                "ticker":      data.get("ticker", "SPY"),
-                "price":       str(data.get("price", data.get("close", "unknown"))),
-                "time":        data.get("time", data.get("bar_time", "unknown")),
-                "open":        str(data.get("open", "")),
-                "high":        str(data.get("high", "")),
-                "low":         str(data.get("low", "")),
-                "volume":      str(data.get("volume", "")),
-                "bar_time":    data.get("bar_time", ""),
-                "raw":         raw_body,
+                "signal_type":    str(data.get("signal", data.get("signal_type", "UNKNOWN"))).upper(),
+                "ticker":         data.get("ticker", "SPY"),
+                "price":          str(data.get("price", data.get("close", "unknown"))),
+                "time":           data.get("time", data.get("bar_time", "unknown")),
+                "open":           str(data.get("open", "")),
+                "high":           str(data.get("high", "")),
+                "low":            str(data.get("low", "")),
+                "volume":         str(data.get("volume", "")),
+                "bar_time":       data.get("bar_time", ""),
+                "ma20":           str(data.get("ma20", "")),
+                "ldnH":           str(data.get("ldnH", "")),
+                "ldnL":           str(data.get("ldnL", "")),
+                "nyH":            str(data.get("nyH", "")),
+                "nyL":            str(data.get("nyL", "")),
+                "at_support":     data.get("at_support", False),
+                "at_resistance":  data.get("at_resistance", False),
+                "score":          str(data.get("score", "")),
+                "raw":            raw_body,
             }
             return normalized
     except (json.JSONDecodeError, ValueError):
@@ -175,6 +183,45 @@ def compute_candle_stats(parsed: dict) -> dict:
     return stats
 
 
+
+def suggest_strike(parsed: dict, direction: str) -> str:
+    """
+    Suggest a 0DTE strike based on price, support/resistance, and London levels.
+    Logic:
+      CALL — buy ATM or 1 strike OTM above price, biased toward resistance as target
+      PUT  — buy ATM or 1 strike OTM below price, biased toward support as target
+    SPY options trade in $1 increments.
+    """
+    try:
+        price = float(parsed.get("price", 0))
+        if not price:
+            return "ATM"
+
+        # Round to nearest $1 strike
+        atm = round(price)
+
+        if direction == "LONG":
+            # Entry: ATM or 1 strike above if price is closer to upper half
+            entry_strike = atm if (price - atm) < 0.50 else atm + 1
+            # Target: resistance level if available
+            res = parsed.get("ldnH") or parsed.get("nyH")
+            if res and res not in ("", "null", "None"):
+                target = round(float(res))
+                return f"${entry_strike}C → target ${target}C"
+            return f"${entry_strike}C"
+
+        else:  # SHORT
+            entry_strike = atm if (atm - price) < 0.50 else atm - 1
+            sup = parsed.get("ldnL") or parsed.get("nyL")
+            if sup and sup not in ("", "null", "None"):
+                target = round(float(sup))
+                return f"${entry_strike}P → target ${target}P"
+            return f"${entry_strike}P"
+
+    except (ValueError, TypeError):
+        return "ATM"
+
+
 def build_claude_prompt(parsed: dict, config: dict) -> str:
     signal_type  = parsed.get("signal_type", "UNKNOWN")
     ticker       = parsed.get("ticker", "SPY")
@@ -189,6 +236,32 @@ def build_claude_prompt(parsed: dict, config: dict) -> str:
 
     candle_block = format_candle_context(parsed)
     stats        = compute_candle_stats(parsed)
+    strike       = suggest_strike(parsed, direction)
+
+    # Level context
+    ldn_h = parsed.get("ldnH", "")
+    ldn_l = parsed.get("ldnL", "")
+    ny_h  = parsed.get("nyH",  "")
+    ny_l  = parsed.get("nyL",  "")
+    ma20  = parsed.get("ma20", "")
+    at_sup = parsed.get("at_support", False)
+    at_res = parsed.get("at_resistance", False)
+
+    levels_block = (
+        f"  London High: ${ldn_h}\n" if ldn_h and ldn_h not in ("", "null") else ""
+    ) + (
+        f"  London Low:  ${ldn_l}\n" if ldn_l and ldn_l not in ("", "null") else ""
+    ) + (
+        f"  NY High:     ${ny_h}\n"  if ny_h  and ny_h  not in ("", "null") else ""
+    ) + (
+        f"  NY Low:      ${ny_l}\n"  if ny_l  and ny_l  not in ("", "null") else ""
+    ) + (
+        f"  20MA:        ${ma20}\n"  if ma20  and ma20  not in ("", "null") else ""
+    ) + (
+        f"  At Support:  {'YES' if at_sup else 'NO'}\n"
+    ) + (
+        f"  At Resistance: {'YES' if at_res else 'NO'}\n"
+    )
 
     stats_lines = ""
     if stats:
@@ -234,6 +307,10 @@ Candle data from TradingView (live, filled by {{{{placeholders}}}}):
 {candle_block}
 {stats_lines}
 
+Key levels (live from Pine Script):
+{levels_block}
+Suggested 0DTE strike: {strike}
+
 Gates confirmed by Pine Script (barstate.isconfirmed, no repaint):
 {gates_text}
 
@@ -252,6 +329,7 @@ Gates passed:
 
 ⚡ Read: [One sharp sentence — what price action + candle structure tells you RIGHT NOW. Be specific, use the actual price levels from the data. No generic statements.]
 
+🎯 Strike: {strike}
 💰 Budget: $50-60 max | No trades before 9:50 AM | Wait for pullback
 ⚠️ Not financial advice. Educational only."""
 
@@ -332,7 +410,15 @@ def test():
         "high": 736.75,
         "low": 735.90,
         "volume": 1482300,
-        "bar_time": "2025-05-13T17:12:00Z"
+        "bar_time": "2025-05-13T17:12:00Z",
+        "ma20": 736.20,
+        "ldnH": 737.61,
+        "ldnL": 735.73,
+        "nyH": 736.75,
+        "nyL": 735.90,
+        "at_support": True,
+        "at_resistance": False,
+        "score": 6
     })
 
     parsed   = parse_tradingview_message(fake_payload)
