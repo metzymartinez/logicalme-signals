@@ -275,7 +275,7 @@ def analyze_with_claude(parsed: dict) -> str:
     prompt = build_claude_prompt(parsed, config)
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=600,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -352,7 +352,7 @@ def home():
     return jsonify({
         "status": "Logical Me Signal Server running",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6",
         "alert_format": {
             "recommended": "JSON with {{ticker}}, {{close}}, {{open}}, {{high}}, {{low}}, {{volume}}, {{time}}",
             "example": '{"signal":"STAR_LONG","ticker":"{{ticker}}","price":{{close}},"open":{{open}},"high":{{high}},"low":{{low}},"volume":{{volume}},"time":"{{time}}"}'
