@@ -65,23 +65,42 @@ SIGNAL_CONFIG = {
 
 def parse_tradingview_message(raw_body: str) -> dict:
     """
-    TradingView sends plain text: 'EARLY_CALL SPY 737.40 14:32'
-    Returns a structured dict with signal_type, ticker, price, time.
-    Also handles JSON payloads for future flexibility.
+    Supports two formats:
+
+    1. JSON (recommended — set your TV alert message to JSON):
+       {"signal":"STAR_LONG","ticker":"SPY","price":736.67,"time":"2025-05-13T17:03:36Z",
+        "open":736.40,"high":736.75,"low":736.00,"volume":1234567,"bar_time":"2025-05-13T17:03:00Z"}
+
+    2. Plain text (legacy fallback):
+       STAR_LONG SPY 736.67 17:03 open=736.40 high=736.75 low=736.00 vol=1234567
     """
     raw_body = raw_body.strip()
 
-    # Try JSON first (future-proof)
+    # ── JSON path ──────────────────────────────────────────────
     try:
         data = json.loads(raw_body)
         if isinstance(data, dict):
-            return data
+            # Normalize field names
+            normalized = {
+                "signal_type": str(data.get("signal", data.get("signal_type", "UNKNOWN"))).upper(),
+                "ticker":      data.get("ticker", "SPY"),
+                "price":       str(data.get("price", data.get("close", "unknown"))),
+                "time":        data.get("time", data.get("bar_time", "unknown")),
+                "open":        str(data.get("open", "")),
+                "high":        str(data.get("high", "")),
+                "low":         str(data.get("low", "")),
+                "volume":      str(data.get("volume", "")),
+                "bar_time":    data.get("bar_time", ""),
+                "raw":         raw_body,
+            }
+            return normalized
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Parse plain text format: SIGNAL_TYPE TICKER PRICE TIME
-    parts = raw_body.split()
+    # ── Plain text path ────────────────────────────────────────
+    # Expected: SIGNAL TICKER PRICE TIME [key=value ...]
     result = {"raw": raw_body}
+    parts = raw_body.split()
 
     if len(parts) >= 1:
         result["signal_type"] = parts[0].upper()
@@ -90,50 +109,148 @@ def parse_tradingview_message(raw_body: str) -> dict:
     if len(parts) >= 3:
         result["price"] = parts[2]
     if len(parts) >= 4:
-        result["time"] = " ".join(parts[3:])
+        # Time may be "13:12" or "13:12 ET" — grab until next key=value or end
+        time_parts = []
+        extra_parts = []
+        for p in parts[3:]:
+            if "=" in p:
+                extra_parts.append(p)
+            else:
+                time_parts.append(p)
+        result["time"] = " ".join(time_parts)
+
+        # Parse optional key=value extras: open=736.40 high=736.75 low=736.00 vol=1234567
+        for kv in extra_parts:
+            k, v = kv.split("=", 1)
+            k = k.lower().strip()
+            if k in ("open", "o"):
+                result["open"] = v
+            elif k in ("high", "h"):
+                result["high"] = v
+            elif k in ("low", "l"):
+                result["low"] = v
+            elif k in ("volume", "vol", "v"):
+                result["volume"] = v
 
     return result
 
 
-def build_claude_prompt(signal_type: str, ticker: str, price: str, time_et: str, config: dict) -> str:
-    direction = config["direction"]
-    option_type = config["option"]
-    description = config["description"]
-    entry_note = config["entry_note"]
-    conviction_base = config["conviction_base"]
-    emoji = config["emoji"]
+def format_candle_context(parsed: dict) -> str:
+    """Build a readable candle data block if OHLV data is present."""
+    lines = []
+    if parsed.get("open"):
+        lines.append(f"  Open:   ${parsed['open']}")
+    if parsed.get("high"):
+        lines.append(f"  High:   ${parsed['high']}")
+    if parsed.get("low"):
+        lines.append(f"  Low:    ${parsed['low']}")
+    if parsed.get("price"):
+        lines.append(f"  Close:  ${parsed['price']}")
+    if parsed.get("volume"):
+        vol = parsed["volume"]
+        try:
+            vol = f"{int(float(vol)):,}"
+        except (ValueError, TypeError):
+            pass
+        lines.append(f"  Volume: {vol}")
+    return "\n".join(lines) if lines else "  (no candle data)"
+
+
+def compute_candle_stats(parsed: dict) -> dict:
+    """Derive range, body size, and direction from OHLCV if available."""
+    stats = {}
+    try:
+        o = float(parsed.get("open", 0))
+        h = float(parsed.get("high", 0))
+        l = float(parsed.get("low", 0))
+        c = float(parsed.get("price", 0))
+        if all([o, h, l, c]):
+            stats["range"] = round(h - l, 2)
+            stats["body"] = round(abs(c - o), 2)
+            stats["candle_direction"] = "bullish" if c > o else "bearish"
+            stats["wick_upper"] = round(h - max(o, c), 2)
+            stats["wick_lower"] = round(min(o, c) - l, 2)
+    except (ValueError, TypeError):
+        pass
+    return stats
+
+
+def build_claude_prompt(parsed: dict, config: dict) -> str:
+    signal_type  = parsed.get("signal_type", "UNKNOWN")
+    ticker       = parsed.get("ticker", "SPY")
+    price        = parsed.get("price", "unknown")
+    time_et      = parsed.get("time", "unknown")
+    direction    = config["direction"]
+    option_type  = config["option"]
+    description  = config["description"]
+    entry_note   = config["entry_note"]
+    conviction   = config["conviction_base"]
+    emoji        = config["emoji"]
+
+    candle_block = format_candle_context(parsed)
+    stats        = compute_candle_stats(parsed)
+
+    stats_lines = ""
+    if stats:
+        stats_lines = (
+            f"\nCandle stats (auto-computed):\n"
+            f"  Range: ${stats.get('range','?')} | Body: ${stats.get('body','?')} | "
+            f"Direction: {stats.get('candle_direction','?')}\n"
+            f"  Upper wick: ${stats.get('wick_upper','?')} | Lower wick: ${stats.get('wick_lower','?')}"
+        )
+
+    gates = (
+        [
+            "20MA ABOVE 200MA — uptrend structure intact",
+            "Price ABOVE 20MA — bulls in control",
+            "MACD bullish zero-cross up — momentum confirming",
+            "CDV green or flipping green — money flow rotating long",
+            "Stoch curling or crossing up at support — cycle low",
+        ]
+        if direction == "LONG"
+        else [
+            "20MA BELOW 200MA — downtrend structure intact",
+            "Price BELOW 20MA — bears in control",
+            "MACD bearish / zero cross down — momentum confirming",
+            "CDV red or slowing — money flow rotating short",
+            "Stoch curling or crossing down at resistance — cycle high",
+        ]
+    )
+    gates_text = "\n".join(f"✅ {g}" for g in gates)
 
     return f"""You are Logical Me, an intraday SPY options signal system using the Oliver Velez Pristine Method and Walter Bressert cycle analysis.
 
-A Pine Script alert just fired on the SPY 2-minute chart:
+A Pine Script alert just fired on the {ticker} 2-minute chart:
 
-SIGNAL: {signal_type}
-TICKER: {ticker}
-PRICE: ${price}
+SIGNAL:    {signal_type}
+TICKER:    {ticker}
+CLOSE:     ${price}
 TIME (ET): {time_et}
 DIRECTION: {direction}
-SIGNAL DESCRIPTION: {description}
-PINE SCRIPT CONVICTION BASE: {conviction_base}/6
+DESCRIPTION: {description}
+CONVICTION: {conviction}/6
 
-This signal already passed these gates in Pine Script (barstate.isconfirmed, no repaint):
-{"- 20ma ABOVE 200ma" if direction == "LONG" else "- 20ma BELOW 200ma"}
-{"- Price ABOVE 20ma" if direction == "LONG" else "- Price BELOW 20ma"}
-{"- MACD bullish / zero cross up" if direction == "LONG" else "- MACD bearish / zero cross down"}
-{"- CDV green or flipping green" if direction == "LONG" else "- CDV red or slowing"}
-{"- Stoch curling or crossing up" if direction == "LONG" else "- Stoch curling or crossing down"}
-{"- At or near support level" if direction == "LONG" else "- At or near resistance level"}
+Candle data from TradingView (live, filled by {{{{placeholders}}}}):
+{candle_block}
+{stats_lines}
 
-Your job: Write a tight Telegram signal message. Use this exact format:
+Gates confirmed by Pine Script (barstate.isconfirmed, no repaint):
+{gates_text}
+
+Write a tight Telegram signal message in this EXACT format — no deviations:
 
 {emoji} {signal_type} — {ticker} ${price} @ {time_et}
 ━━━━━━━━━━━━━━━━━━━━
 Option: 0DTE {option_type}
-Conviction: {conviction_base}/6
+Conviction: {conviction}/6
 {entry_note}
 
-Gates passed: [list the 4-5 key gates that fired, one per line with ✅]
+Gates passed:
+[list the 4-5 key gates that fired, one per line with ✅]
 
-⚡ Read: [One sharp sentence — what the chart is telling you right now. Be specific about price action, not generic.]
+📊 Candle: [one line — close vs open, range, any notable wicks. Use the actual numbers.]
+
+⚡ Read: [One sharp sentence — what price action + candle structure tells you RIGHT NOW. Be specific, use the actual price levels from the data. No generic statements.]
 
 💰 Budget: $50-60 max | No trades before 9:50 AM | Wait for pullback
 ⚠️ Not financial advice. Educational only."""
@@ -141,25 +258,25 @@ Gates passed: [list the 4-5 key gates that fired, one per line with ✅]
 
 def analyze_with_claude(parsed: dict) -> str:
     signal_type = parsed.get("signal_type", "UNKNOWN").upper()
-    ticker = parsed.get("ticker", "SPY")
-    price = parsed.get("price", "unknown")
-    time_et = parsed.get("time", "unknown")
+    ticker      = parsed.get("ticker", "SPY")
+    price       = parsed.get("price", "unknown")
+    time_et     = parsed.get("time", "unknown")
 
     config = SIGNAL_CONFIG.get(signal_type)
 
     if not config:
-        # Unknown signal — fall back to a generic message
         return (
-            f"⚠️ <b>Unknown signal type: {signal_type}</b>\n"
+            f"⚠️ <b>Unknown signal: {signal_type}</b>\n"
             f"Ticker: {ticker} | Price: ${price} | Time: {time_et}\n"
-            f"Check Pine Script alertcondition names match server SIGNAL_CONFIG keys."
+            f"Check Pine Script alertcondition names match SIGNAL_CONFIG keys.\n"
+            f"Raw: {parsed.get('raw', '')}"
         )
 
-    prompt = build_claude_prompt(signal_type, ticker, price, time_et, config)
+    prompt = build_claude_prompt(parsed, config)
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=500,
+        model="claude-sonnet-4-20250514",
+        max_tokens=600,
         messages=[{"role": "user", "content": prompt}]
     )
     return response.content[0].text
@@ -180,7 +297,7 @@ def send_telegram(message: str):
 def receive_alert():
     try:
         raw_body = request.data.decode("utf-8")
-        parsed = parse_tradingview_message(raw_body)
+        parsed   = parse_tradingview_message(raw_body)
         signal_type = parsed.get("signal_type", "UNKNOWN")
 
         analysis = analyze_with_claude(parsed)
@@ -188,7 +305,7 @@ def receive_alert():
         header = f"<b>LOGICAL ME — {signal_type}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
         send_telegram(header + analysis)
 
-        return jsonify({"status": "ok", "signal": signal_type}), 200
+        return jsonify({"status": "ok", "signal": signal_type, "parsed": parsed}), 200
 
     except Exception as e:
         error_msg = f"⚠️ Logical Me error: {str(e)}"
@@ -202,15 +319,25 @@ def receive_alert():
 @app.route("/test", methods=["GET"])
 def test():
     """
-    Simulates an EARLY_CALL firing — hits the same code path as a real TradingView webhook.
-    Visit https://logicalme-signals.onrender.com/test in your browser to wake the server
-    and confirm the full pipeline: parse → Claude → Telegram.
+    Simulates a STAR_LONG with full OHLCV data — JSON format.
+    Visit /test in your browser to confirm the full pipeline.
     """
-    fake_payload = "EARLY_CALL SPY 737.40 13:12 ET"
-    parsed = parse_tradingview_message(fake_payload)
+    fake_payload = json.dumps({
+        "signal": "STAR_LONG",
+        "ticker": "SPY",
+        "price": 736.67,
+        "time": "13:12 ET",
+        "open": 736.10,
+        "high": 736.75,
+        "low": 735.90,
+        "volume": 1482300,
+        "bar_time": "2025-05-13T17:12:00Z"
+    })
+
+    parsed   = parse_tradingview_message(fake_payload)
     analysis = analyze_with_claude(parsed)
 
-    header = "<b>LOGICAL ME TEST — EARLY_CALL</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+    header = "<b>LOGICAL ME TEST — STAR_LONG</b>\n━━━━━━━━━━━━━━━━━━━━\n"
     send_telegram(header + analysis)
 
     return jsonify({
@@ -226,9 +353,13 @@ def home():
         "status": "Logical Me Signal Server running",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
         "model": "claude-sonnet-4-20250514",
+        "alert_format": {
+            "recommended": "JSON with {{ticker}}, {{close}}, {{open}}, {{high}}, {{low}}, {{volume}}, {{time}}",
+            "example": '{"signal":"STAR_LONG","ticker":"{{ticker}}","price":{{close}},"open":{{open}},"high":{{high}},"low":{{low}},"volume":{{volume}},"time":"{{time}}"}'
+        }
     }), 200
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
