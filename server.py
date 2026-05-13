@@ -158,7 +158,7 @@ def analyze_with_claude(parsed: dict) -> str:
     prompt = build_claude_prompt(signal_type, ticker, price, time_et, config)
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
