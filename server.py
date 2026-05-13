@@ -319,8 +319,9 @@ def receive_alert():
 @app.route("/test", methods=["GET"])
 def test():
     """
-    Simulates a STAR_LONG with full OHLCV data — JSON format.
-    Visit /test in your browser to confirm the full pipeline.
+    Returns JSON only — does NOT send to Telegram.
+    To send to Telegram: /test?send=true&key=YOUR_TEST_KEY
+    Set TEST_KEY as an environment variable on Render.
     """
     fake_payload = json.dumps({
         "signal": "STAR_LONG",
@@ -337,11 +338,20 @@ def test():
     parsed   = parse_tradingview_message(fake_payload)
     analysis = analyze_with_claude(parsed)
 
-    header = "<b>LOGICAL ME TEST — STAR_LONG</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-    send_telegram(header + analysis)
+    # Only send to Telegram if explicitly requested with correct key
+    telegram_sent = False
+    if request.args.get("send") == "true":
+        provided_key = request.args.get("key", "")
+        test_key     = os.environ.get("TEST_KEY", "")
+        if provided_key and test_key and provided_key == test_key:
+            header = "<b>LOGICAL ME TEST — STAR_LONG</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+            send_telegram(header + analysis)
+            telegram_sent = True
+        else:
+            return jsonify({"status": "unauthorized — wrong or missing TEST_KEY"}), 401
 
     return jsonify({
-        "status": "test sent to Telegram",
+        "status": "ok — Telegram sent" if telegram_sent else "ok — JSON only, no Telegram",
         "parsed": parsed,
         "analysis": analysis,
     }), 200
