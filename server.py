@@ -7,88 +7,131 @@ from anthropic import Anthropic
 app = Flask(__name__)
 client = Anthropic()
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Signal metadata
+# ============================================================
+# === SIGNAL CONFIG — matches v11 alert() names exactly
+# ============================================================
 SIGNAL_CONFIG = {
-    "MACD_CROSS_UP": {
+    "STAR_LONG": {
         "direction": "LONG",
-        "emoji": "🟢",
+        "emoji": "⭐",
         "option": "CALL",
-        "conviction": "MACD zero cross up",
+        "label": "STAR LONG",
+        "conviction": "Highest conviction — all gates confirmed",
     },
-    "MACD_CROSS_DN": {
+    "STAR_SHORT": {
         "direction": "SHORT",
-        "emoji": "🔴",
+        "emoji": "⭐",
         "option": "PUT",
-        "conviction": "MACD zero cross down",
+        "label": "STAR SHORT",
+        "conviction": "Highest conviction — all gates confirmed",
     },
     "EARLY_CALL": {
         "direction": "LONG",
         "emoji": "🟡",
         "option": "CALL",
+        "label": "EARLY CALL",
         "conviction": "Early — at support, stoch curling up, CDV flipping green",
-    },
-    "STAR_BUY": {
-        "direction": "LONG",
-        "emoji": "⭐",
-        "option": "CALL",
-        "conviction": "STAR — highest conviction, all gates confirmed",
-    },
-    "LONG": {
-        "direction": "LONG",
-        "emoji": "🟢",
-        "option": "CALL",
-        "conviction": "Volume + OR trigger confirmed, CDV not vetoing",
-    },
-    "CANDLE_BULL": {
-        "direction": "LONG",
-        "emoji": "🕯",
-        "option": "CALL",
-        "conviction": "Candle rejection at support — hammer / bull engulf / doji",
     },
     "EARLY_PUT": {
         "direction": "SHORT",
         "emoji": "🟡",
         "option": "PUT",
+        "label": "EARLY PUT",
         "conviction": "Early — at resistance, stoch curling down, CDV slowing",
     },
-    "STAR_SELL": {
+    "PULL_LONG": {
+        "direction": "LONG",
+        "emoji": "🐂",
+        "option": "CALL",
+        "label": "PULLBACK",
+        "conviction": "Pullback to 20ma in uptrend — pristine reclaim",
+    },
+    "RALLY_SHORT": {
         "direction": "SHORT",
-        "emoji": "⭐",
+        "emoji": "🐻",
         "option": "PUT",
-        "conviction": "STAR — highest conviction, all gates confirmed",
+        "label": "RALLY FADE",
+        "conviction": "Rally to 20ma in downtrend — pristine fade",
+    },
+    "FLIP_LONG": {
+        "direction": "LONG",
+        "emoji": "⚡",
+        "option": "CALL",
+        "label": "15m FLIP LONG",
+        "conviction": "15m CDV flipped green + 1H green — institutional buy",
+    },
+    "FLIP_SHORT": {
+        "direction": "SHORT",
+        "emoji": "⚡",
+        "option": "PUT",
+        "label": "15m FLIP SHORT",
+        "conviction": "15m CDV flipped red + 1H red — institutional sell",
+    },
+    "999_LONG": {
+        "direction": "LONG",
+        "emoji": "🟡",
+        "option": "CALL",
+        "label": "999 EMA LONG",
+        "conviction": "Price near 999 EMA above — battlefield bounce",
+    },
+    "999_SHORT": {
+        "direction": "SHORT",
+        "emoji": "🟡",
+        "option": "PUT",
+        "label": "999 EMA SHORT",
+        "conviction": "Price near 999 EMA below — battlefield rejection",
+    },
+    "LONG": {
+        "direction": "LONG",
+        "emoji": "🟢",
+        "option": "CALL",
+        "label": "LONG",
+        "conviction": "CDV + trigger confirmed",
     },
     "SHORT": {
         "direction": "SHORT",
         "emoji": "🔴",
         "option": "PUT",
-        "conviction": "Volume + OR trigger confirmed, CDV not vetoing",
+        "label": "SHORT",
+        "conviction": "CDV + trigger confirmed",
     },
-    "PULLBACK": {
+    "MACD_CROSS_UP": {
         "direction": "LONG",
-        "emoji": "🔵",
+        "emoji": "📈",
         "option": "CALL",
-        "conviction": "Pullback to 20ma in uptrend — reclaim entry",
+        "label": "MACD CROSS UP",
+        "conviction": "MACD crossed zero line up with CDV fuel",
     },
-    "RALLY": {
+    "MACD_CROSS_DN": {
         "direction": "SHORT",
-        "emoji": "🔵",
+        "emoji": "📉",
         "option": "PUT",
-        "conviction": "Rally to 20ma in downtrend — fade entry",
+        "label": "MACD CROSS DOWN",
+        "conviction": "MACD crossed zero line down with CDV fuel",
+    },
+    "CANDLE_BULL": {
+        "direction": "LONG",
+        "emoji": "🕯",
+        "option": "CALL",
+        "label": "CANDLE BULL",
+        "conviction": "Hammer / bull engulf / doji at support",
     },
     "CANDLE_BEAR": {
         "direction": "SHORT",
         "emoji": "🕯",
         "option": "PUT",
-        "conviction": "Candle rejection at resistance — shooting star / bear engulf / doji",
+        "label": "CANDLE BEAR",
+        "conviction": "Shooting star / bear engulf / doji at resistance",
     },
 }
 
 
-# ── Parsers ────────────────────────────────────────────────────────────────
-
+# ============================================================
+# === PARSER — reads full v11 JSON payload
+# ============================================================
 def parse_tradingview_message(raw_body: str) -> dict:
     raw_body = raw_body.strip()
     try:
@@ -97,20 +140,37 @@ def parse_tradingview_message(raw_body: str) -> dict:
             return {
                 "signal_type":   str(data.get("signal", data.get("signal_type", "UNKNOWN"))).strip().upper().replace(" ", "_"),
                 "ticker":        data.get("ticker", "SPY"),
-                "price":         str(data.get("price", data.get("close", ""))),
-                "time":          data.get("time", data.get("bar_time", "")),
+                "price":         str(data.get("price", "")),
+                "time":          data.get("time", ""),
                 "open":          str(data.get("open", "")),
                 "high":          str(data.get("high", "")),
                 "low":           str(data.get("low", "")),
                 "volume":        str(data.get("volume", "")),
+                # MAs
                 "ma20":          str(data.get("ma20", "")),
+                "ma33":          str(data.get("ma33", "")),
+                "ma200":         str(data.get("ma200", "")),
+                "ma999":         str(data.get("ma999", "")),
+                # Session levels
                 "ldnH":          str(data.get("ldnH", "")),
                 "ldnL":          str(data.get("ldnL", "")),
                 "nyH":           str(data.get("nyH", "")),
                 "nyL":           str(data.get("nyL", "")),
+                # Context
                 "at_support":    data.get("at_support", False),
                 "at_resistance": data.get("at_resistance", False),
                 "score":         str(data.get("score", "")),
+                "regime":        str(data.get("regime", "")),
+                "rvol":          data.get("rvol", False),
+                # CDV all timeframes
+                "cdv_4h":        str(data.get("cdv_4h", "")),
+                "cdv_1h":        str(data.get("cdv_1h", "")),
+                "cdv_15m":       str(data.get("cdv_15m", "")),
+                "cdv_2m":        str(data.get("cdv_2m", "")),
+                # Indicators
+                "stoch_k":       str(data.get("stoch_k", "")),
+                "macd":          str(data.get("macd", "")),
+                "choch":         str(data.get("choch", "")),
                 "raw":           raw_body,
             }
     except (json.JSONDecodeError, ValueError):
@@ -125,13 +185,65 @@ def parse_tradingview_message(raw_body: str) -> dict:
     return result
 
 
-# ── Calculators ────────────────────────────────────────────────────────────
-
+# ============================================================
+# === HELPERS
+# ============================================================
 def safe_float(val, default=0.0):
     try:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def format_volume(vol_str: str) -> str:
+    try:
+        v = int(float(vol_str))
+        if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
+        if v >= 1_000:     return f"{v/1_000:.0f}K"
+        return str(v)
+    except (ValueError, TypeError):
+        return vol_str or "n/a"
+
+
+def cdv_emoji(val: str) -> str:
+    return "🟢" if str(val).upper() == "GREEN" else "🔴"
+
+
+# ============================================================
+# === TARGET ENGINE
+# ============================================================
+def compute_targets(parsed: dict, direction: str) -> dict:
+    price  = safe_float(parsed.get("price"))
+    ma200  = safe_float(parsed.get("ma200"))
+    ma999  = safe_float(parsed.get("ma999"))
+    ldn_h  = safe_float(parsed.get("ldnH"))
+    ldn_l  = safe_float(parsed.get("ldnL"))
+    ny_h   = safe_float(parsed.get("nyH"))
+    ny_l   = safe_float(parsed.get("nyL"))
+
+    if direction == "LONG":
+        # First target: London High → NY High
+        t1 = ldn_h if ldn_h > price else (ny_h if ny_h > price else 0)
+        # Second target: 200 SMA if above price
+        t2 = ma200 if ma200 > price else 0
+        # Final target: 999 EMA if above price
+        t3 = ma999 if ma999 > price else 0
+        move = (t1 - price) if t1 else 0
+    else:
+        # First target: London Low → NY Low
+        t1 = ldn_l if ldn_l < price else (ny_l if ny_l < price else 0)
+        # Second target: 200 SMA if below
+        t2 = ma200 if ma200 < price else 0
+        # Final target: 999 EMA if below
+        t3 = ma999 if ma999 < price else 0
+        move = (price - t1) if t1 else 0
+
+    return {
+        "t1":    f"${t1:.2f}" if t1 else "n/a",
+        "t2":    f"${t2:.2f}" if t2 else "n/a",
+        "t3_999": f"${t3:.2f}" if t3 else "n/a",
+        "move":  f"+${move:.2f}" if direction == "LONG" and move else f"-${abs(move):.2f}" if move else "n/a",
+    }
 
 
 def suggest_strike(parsed: dict, direction: str) -> str:
@@ -141,87 +253,59 @@ def suggest_strike(parsed: dict, direction: str) -> str:
     atm = round(price)
     if direction == "LONG":
         strike = atm if (price - atm) < 0.50 else atm + 1
-        res = parsed.get("ldnH") or parsed.get("nyH")
-        if res and res not in ("", "null", "None"):
-            return f"${strike}C → target ${round(safe_float(res))}C"
         return f"${strike}C"
     else:
         strike = atm if (atm - price) < 0.50 else atm - 1
-        sup = parsed.get("ldnL") or parsed.get("nyL")
-        if sup and sup not in ("", "null", "None"):
-            return f"${strike}P → target ${round(safe_float(sup))}P"
         return f"${strike}P"
 
 
-def compute_targets(price: float, direction: str) -> dict:
-    """
-    Entry price unknown until filled — use estimated option price.
-    For 0DTE ATM SPY options: rough entry ~$0.50-$1.50.
-    We use a $1.00 placeholder until Greeks are wired.
-    Conservative = 3x, Lottery = 8x, Stop = 50%.
-    """
-    entry_est = 1.00  # placeholder — will be replaced by Greeks later
-    return {
-        "entry_est":    f"${entry_est:.2f}",
-        "conservative": f"${entry_est * 3:.2f}",
-        "lottery":      f"${entry_est * 8:.2f}",
-        "stop":         f"${entry_est * 0.50:.2f}",
-    }
+def check_200_pattern(parsed: dict, direction: str) -> str | None:
+    price  = safe_float(parsed.get("price"))
+    ma200  = safe_float(parsed.get("ma200"))
+    cdv_15m = parsed.get("cdv_15m", "").upper()
+    cdv_1h  = parsed.get("cdv_1h",  "").upper()
+
+    if not price or not ma200:
+        return None
+
+    near_200 = abs(price - ma200) / ma200 < 0.003
+
+    if near_200:
+        if direction == "SHORT" and cdv_15m == "RED" and cdv_1h == "RED":
+            return "⚠️ 200 SMA bounce = FAKE — CDV still red — hunting 999 EMA"
+        if direction == "LONG" and cdv_15m == "GREEN" and cdv_1h == "GREEN":
+            return "✅ 200 SMA held — CDV green — extended target 999 EMA"
+    return None
 
 
-def compute_move(parsed: dict, direction: str) -> str:
-    price = safe_float(parsed.get("price"))
-    if not price:
-        return "n/a"
-    if direction == "LONG":
-        target_raw = parsed.get("ldnH") or parsed.get("nyH")
-    else:
-        target_raw = parsed.get("ldnL") or parsed.get("nyL")
-    target = safe_float(target_raw)
-    if not target:
-        return "n/a"
-    move = target - price if direction == "LONG" else price - target
-    sign = "+" if direction == "LONG" else "-"
-    return f"{sign}${abs(move):.2f}"
-
-
-def format_volume(vol_str: str) -> str:
-    try:
-        v = int(float(vol_str))
-        if v >= 1_000_000:
-            return f"{v/1_000_000:.1f}M"
-        if v >= 1_000:
-            return f"{v/1_000:.0f}K"
-        return str(v)
-    except (ValueError, TypeError):
-        return vol_str or "n/a"
-
-
-# ── Claude — one sentence only ─────────────────────────────────────────────
-
+# ============================================================
+# === CLAUDE ONE-LINER
+# ============================================================
 def get_claude_read(parsed: dict, config: dict) -> str:
     price     = parsed.get("price", "?")
     direction = config["direction"]
+    ma999     = parsed.get("ma999", "")
+    ma200     = parsed.get("ma200", "")
+    ma20      = parsed.get("ma20", "")
     ldn_h     = parsed.get("ldnH", "")
     ldn_l     = parsed.get("ldnL", "")
-    ny_h      = parsed.get("nyH", "")
-    ny_l      = parsed.get("nyL", "")
-    ma20      = parsed.get("ma20", "")
-    at_sup    = parsed.get("at_support", False)
-    at_res    = parsed.get("at_resistance", False)
-    conviction = config["conviction"]
+    regime    = parsed.get("regime", "")
+    score     = parsed.get("score", "")
+    cdv_4h    = parsed.get("cdv_4h", "")
+    cdv_1h    = parsed.get("cdv_1h", "")
+    cdv_15m   = parsed.get("cdv_15m", "")
+    cdv_2m    = parsed.get("cdv_2m", "")
 
-    prompt = f"""You are Logical Me, an intraday SPY options signal system using Oliver Velez Pristine Method.
+    prompt = f"""You are Logical Me — an intraday SPY options signal system using Oliver Velez Pristine Method + CDV + 999 EMA.
 
-Signal fired: {config['option']} | Direction: {direction}
-SPY price: ${price}
+Signal: {config['label']} | Direction: {direction} | Score: {score}/6
+SPY price: ${price} | Regime: {regime}
 London High: ${ldn_h} | London Low: ${ldn_l}
-NY High: ${ny_h} | NY Low: ${ny_l}
-20MA: ${ma20}
-At Support: {at_sup} | At Resistance: {at_res}
-Conviction: {conviction}
+20 SMA: ${ma20} | 200 SMA: ${ma200} | 999 EMA: ${ma999}
+CDV — 4H: {cdv_4h} | 1H: {cdv_1h} | 15m: {cdv_15m} | 2m: {cdv_2m}
 
-Write ONE sharp sentence — what price action tells you RIGHT NOW. Use the actual price levels. Be specific. No generic statements. No emojis. Max 20 words."""
+Write ONE sharp sentence — what the tape is telling us RIGHT NOW.
+Use actual price levels. Be specific. No generic statements. No emojis. Max 20 words."""
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
@@ -231,8 +315,9 @@ Write ONE sharp sentence — what price action tells you RIGHT NOW. Use the actu
     return response.content[0].text.strip()
 
 
-# ── Message builder ────────────────────────────────────────────────────────
-
+# ============================================================
+# === TELEGRAM MESSAGE BUILDER
+# ============================================================
 def build_telegram_message(parsed: dict, config: dict) -> str:
     signal_type = parsed.get("signal_type", "UNKNOWN")
     ticker      = parsed.get("ticker", "SPY")
@@ -241,57 +326,73 @@ def build_telegram_message(parsed: dict, config: dict) -> str:
     direction   = config["direction"]
     emoji       = config["emoji"]
     option_type = config["option"]
+    score       = parsed.get("score", "?")
+    regime      = parsed.get("regime", "")
+    rvol        = parsed.get("rvol", False)
 
-    price     = safe_float(price_str)
-    strike    = suggest_strike(parsed, direction)
-    targets   = compute_targets(price, direction)
-    move      = compute_move(parsed, direction)
-    vol_fmt   = format_volume(parsed.get("volume", ""))
+    # CDV alignment
+    cdv_4h  = parsed.get("cdv_4h",  "")
+    cdv_1h  = parsed.get("cdv_1h",  "")
+    cdv_15m = parsed.get("cdv_15m", "")
+    cdv_2m  = parsed.get("cdv_2m",  "")
+    cdv_line = f"{cdv_emoji(cdv_4h)}4H {cdv_emoji(cdv_1h)}1H {cdv_emoji(cdv_15m)}15m {cdv_emoji(cdv_2m)}2m"
 
-    # Level context
-    ldn_h = parsed.get("ldnH", "")
-    ldn_l = parsed.get("ldnL", "")
+    # Targets
+    targets = compute_targets(parsed, direction)
+    strike  = suggest_strike(parsed, direction)
 
-    target_label = ""
-    if direction == "LONG" and ldn_h:
-        target_label = f"Target: ${ldn_h} (London High) | Move: {move}"
-    elif direction == "SHORT" and ldn_l:
-        target_label = f"Target: ${ldn_l} (London Low) | Move: {move}"
+    # MA levels
+    ma999 = parsed.get("ma999", "")
+    ma200 = parsed.get("ma200", "")
+    ma20  = parsed.get("ma20",  "")
 
-    # Claude one-liner
+    # 200 SMA pattern check
+    pattern_warn = check_200_pattern(parsed, direction)
+
+    # Claude read
     read_line = get_claude_read(parsed, config)
 
-    # 15m alignment hint
-    htf_line = "15m: check alignment before sizing up"
+    # Regime tag
+    regime_tag = "🟡 BULL DAY" if regime == "BULL" else "🔴 BEAR DAY" if regime == "BEAR" else ""
+    rvol_tag   = " | RVOL ✓" if rvol else ""
 
     msg = (
-        f"{emoji} <b>{signal_type}</b>\n"
+        f"{emoji} <b>{config['label']}</b> — {ticker} @ <b>${price_str}</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"SPY @ <b>${price_str}</b> | {time_et}\n"
-        f"Vol: {vol_fmt}\n"
+        f"🕐 {time_et} | Score: {score}/6 | {regime_tag}{rvol_tag}\n"
+        f"\n📊 <b>CDV</b>\n"
+        f"{cdv_line}\n"
+        f"\n📐 <b>LEVELS</b>\n"
+        f"T1: {targets['t1']} | Move: {targets['move']}\n"
     )
 
-    if target_label:
-        msg += f"{target_label}\n"
+    if targets['t2'] != "n/a":
+        msg += f"T2: {targets['t2']} (200 SMA)\n"
+
+    if targets['t3_999'] != "n/a":
+        msg += f"T3: {targets['t3_999']} (999 EMA 🎯)\n"
+
+    if ma999:
+        msg += f"999 EMA: ${ma999}\n"
+
+    if pattern_warn:
+        msg += f"\n{pattern_warn}\n"
 
     msg += (
-        f"\n📊 <b>OPTION</b>\n"
-        f"{strike} — 0DTE {option_type}\n"
-        f"\n🎯 <b>TARGETS</b> (est. $1.00 entry)\n"
-        f"Conservative: 3x → {targets['conservative']}\n"
-        f"Lottery:      8x → {targets['lottery']}\n"
-        f"Stop:        50% → {targets['stop']}\n"
+        f"\n🎰 <b>OPTION</b>\n"
+        f"{strike} 0DTE {option_type}\n"
+        f"Stop: 50% | Max: $50–60\n"
         f"\n⚡ <i>{read_line}</i>\n"
-        f"\n📈 {htf_line}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"Place OTOCO on Webull\n"
-        f"<i>Max $50-60 | Not financial advice</i>"
+        f"<i>Not financial advice</i>"
     )
+
     return msg
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
-
+# ============================================================
+# === ROUTES
+# ============================================================
 def send_telegram(message: str):
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
@@ -311,7 +412,7 @@ def receive_alert():
             msg = (
                 f"⚠️ <b>Unknown signal: {signal_type}</b>\n"
                 f"Price: ${parsed.get('price','?')} | Time: {parsed.get('time','?')}\n"
-                f"Check Pine Script alertcondition names match SIGNAL_CONFIG keys."
+                f"Check Pine Script signal names match server SIGNAL_CONFIG."
             )
             send_telegram(msg)
             return jsonify({"status": "unknown signal", "signal": signal_type}), 200
@@ -332,26 +433,38 @@ def receive_alert():
 @app.route("/test", methods=["GET"])
 def test():
     fake_payload = json.dumps({
-        "signal":       "STAR_LONG",
-        "ticker":       "SPY",
-        "price":        736.67,
-        "time":         "10:15 ET",
-        "open":         736.10,
-        "high":         736.75,
-        "low":          735.90,
-        "volume":       1482300,
-        "ma20":         736.20,
-        "ldnH":         740.92,
-        "ldnL":         735.73,
-        "nyH":          736.75,
-        "nyL":          735.90,
-        "at_support":   True,
+        "signal":        "STAR_LONG",
+        "ticker":        "SPY",
+        "price":         736.67,
+        "time":          "10:15 ET",
+        "open":          736.10,
+        "high":          736.75,
+        "low":           735.90,
+        "volume":        1482300,
+        "ma20":          736.20,
+        "ma33":          735.80,
+        "ma200":         734.50,
+        "ma999":         728.30,
+        "ldnH":          740.92,
+        "ldnL":          735.73,
+        "nyH":           736.75,
+        "nyL":           735.90,
+        "at_support":    True,
         "at_resistance": False,
-        "score":        6
+        "score":         6,
+        "regime":        "BULL",
+        "rvol":          True,
+        "cdv_4h":        "GREEN",
+        "cdv_1h":        "GREEN",
+        "cdv_15m":       "GREEN",
+        "cdv_2m":        "GREEN",
+        "stoch_k":       28.5,
+        "macd":          "BULL",
+        "choch":         1,
     })
 
     parsed  = parse_tradingview_message(fake_payload)
-    config  = SIGNAL_CONFIG.get(parsed["signal_type"], SIGNAL_CONFIG["STAR_BUY"])
+    config  = SIGNAL_CONFIG.get(parsed["signal_type"], SIGNAL_CONFIG["STAR_LONG"])
     message = build_telegram_message(parsed, config)
 
     telegram_sent = False
@@ -374,13 +487,10 @@ def test():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "status":           "Logical Me Signal Server running",
+        "status":            "Logical Me v11 Signal Server",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
-        "model":            "claude-sonnet-4-6",
-        "alert_format": {
-            "recommended": "JSON with signal, ticker, price, open, high, low, volume, time, ldnH, ldnL, nyH, nyL, ma20",
-            "example":     '{"signal":"STAR_LONG","ticker":"SPY","price":736.67,"ldnH":740.92,"ldnL":735.73}'
-        }
+        "model":             "claude-sonnet-4-6",
+        "version":           "v11",
     }), 200
 
 
