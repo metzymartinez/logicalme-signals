@@ -3,12 +3,14 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from anthropic import Anthropic
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 client = Anthropic()
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+RENDER_URL       = os.environ.get("RENDER_URL", "http://localhost:5000")
 
 # ============================================================
 # === SIGNAL CONFIG — matches v11 alert() names exactly
@@ -222,19 +224,13 @@ def compute_targets(parsed: dict, direction: str) -> dict:
     ny_l   = safe_float(parsed.get("nyL"))
 
     if direction == "LONG":
-        # First target: London High → NY High
         t1 = ldn_h if ldn_h > price else (ny_h if ny_h > price else 0)
-        # Second target: 200 SMA if above price
         t2 = ma200 if ma200 > price else 0
-        # Final target: 999 EMA if above price
         t3 = ma999 if ma999 > price else 0
         move = (t1 - price) if t1 else 0
     else:
-        # First target: London Low → NY Low
         t1 = ldn_l if ldn_l < price else (ny_l if ny_l < price else 0)
-        # Second target: 200 SMA if below
         t2 = ma200 if ma200 < price else 0
-        # Final target: 999 EMA if below
         t3 = ma999 if ma999 < price else 0
         move = (price - t1) if t1 else 0
 
@@ -330,29 +326,22 @@ def build_telegram_message(parsed: dict, config: dict) -> str:
     regime      = parsed.get("regime", "")
     rvol        = parsed.get("rvol", False)
 
-    # CDV alignment
     cdv_4h  = parsed.get("cdv_4h",  "")
     cdv_1h  = parsed.get("cdv_1h",  "")
     cdv_15m = parsed.get("cdv_15m", "")
     cdv_2m  = parsed.get("cdv_2m",  "")
     cdv_line = f"{cdv_emoji(cdv_4h)}4H {cdv_emoji(cdv_1h)}1H {cdv_emoji(cdv_15m)}15m {cdv_emoji(cdv_2m)}2m"
 
-    # Targets
     targets = compute_targets(parsed, direction)
     strike  = suggest_strike(parsed, direction)
 
-    # MA levels
     ma999 = parsed.get("ma999", "")
     ma200 = parsed.get("ma200", "")
     ma20  = parsed.get("ma20",  "")
 
-    # 200 SMA pattern check
     pattern_warn = check_200_pattern(parsed, direction)
+    read_line    = get_claude_read(parsed, config)
 
-    # Claude read
-    read_line = get_claude_read(parsed, config)
-
-    # Regime tag
     regime_tag = "🟡 BULL DAY" if regime == "BULL" else "🔴 BEAR DAY" if regime == "BEAR" else ""
     rvol_tag   = " | RVOL ✓" if rvol else ""
 
@@ -391,7 +380,7 @@ def build_telegram_message(parsed: dict, config: dict) -> str:
 
 
 # ============================================================
-# === ROUTES
+# === HELPERS
 # ============================================================
 def send_telegram(message: str):
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -400,6 +389,74 @@ def send_telegram(message: str):
     resp.raise_for_status()
 
 
+# ============================================================
+# === SESSION BRIEF — 9AM ET WEEKDAY SCHEDULER
+# ============================================================
+
+BRIEF_PROMPT = """You are Logical Me — SPY session brief system.
+
+PRE-FLIGHT (do this first, do not skip):
+1. Call data_get_pine_tables on the SPY 2min chart.
+2. If the table is empty — stop immediately. Output only:
+   "⚠️ Logical Me isn't painting. Load it on the SPY 2min chart and re-run."
+3. If the table has data — continue.
+
+DATA COLLECTION (read don't reconstruct):
+- Read CDV, levels, and signal data directly from data_get_pine_tables and data_get_pine_labels.
+- Do NOT call data_get_ohlcv to reconstruct anything Logical Me already calculated.
+- Use quote_get for current price only.
+- One targeted news search for macro/catalyst context.
+
+BUILD THE BRIEF:
+- Price, CDV flow, key levels from pine table, news/events, playbook bias.
+- If any section is missing data say so clearly — do not fill in with guesses.
+
+FORMAT (Telegram-ready, no hashtags, no sources block):
+🗓️ [DAY, DATE] · SPY SESSION BRIEF
+━━━━━━━━━━━━━━━━━━━━━
+📍 PRICE: $[price]
+━━━━━━━━━━━━━━━━━━━━━
+📊 FLOW (CDV)
+[cdv alignment across timeframes]
+━━━━━━━━━━━━━━━━━━━━━
+🗺️ MAP
+[key levels from pine table]
+━━━━━━━━━━━━━━━━━━━━━
+📰 NEWS + EVENTS
+[macro bullets]
+━━━━━━━━━━━━━━━━━━━━━
+🎯 PLAYBOOK
+BIAS: [BULL / BEAR / NEUTRAL] — [one sentence why]
+[levels to watch, key triggers]
+━━━━━━━━━━━━━━━━━━━━━"""
+
+
+def run_session_brief():
+    """Called by scheduler at 9:00 AM ET weekdays."""
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": BRIEF_PROMPT}]
+        )
+        brief = response.content[0].text.strip()
+        send_telegram(brief)
+    except Exception as e:
+        try:
+            send_telegram(f"⚠️ Session brief failed: {str(e)}")
+        except Exception:
+            pass
+
+
+# Start scheduler
+scheduler = BackgroundScheduler(timezone="America/New_York")
+scheduler.add_job(run_session_brief, "cron", day_of_week="mon-fri", hour=9, minute=0)
+scheduler.start()
+
+
+# ============================================================
+# === ROUTES
+# ============================================================
 @app.route("/alert", methods=["POST"])
 def receive_alert():
     try:
@@ -427,6 +484,16 @@ def receive_alert():
             send_telegram(error_msg)
         except Exception:
             pass
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/run-brief", methods=["POST", "GET"])
+def trigger_brief():
+    """Manual trigger endpoint — GET or POST to fire brief immediately."""
+    try:
+        run_session_brief()
+        return jsonify({"status": "brief sent"}), 200
+    except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -491,6 +558,7 @@ def home():
         "signals_supported": list(SIGNAL_CONFIG.keys()),
         "model":             "claude-sonnet-4-6",
         "version":           "v11",
+        "brief_schedule":    "9:00 AM ET weekdays",
     }), 200
 
 
