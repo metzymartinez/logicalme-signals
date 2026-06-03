@@ -13,7 +13,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 RENDER_URL       = os.environ.get("RENDER_URL", "http://localhost:5000")
 
 # ============================================================
-# === SIGNAL CONFIG — matches v11 alert() names exactly
+# === SIGNAL CONFIG — matches v11 alert() names exactlys
 # ============================================================
 SIGNAL_CONFIG = {
     "STAR_LONG": {
