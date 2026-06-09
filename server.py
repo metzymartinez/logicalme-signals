@@ -3,17 +3,15 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from anthropic import Anthropic
-from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 client = Anthropic()
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-RENDER_URL       = os.environ.get("RENDER_URL", "http://localhost:5000")
 
 # ============================================================
-# === SIGNAL CONFIG — matches v11 alert() names exactlys
+# === SIGNAL CONFIG — matches v11 alert() names exactly
 # ============================================================
 SIGNAL_CONFIG = {
     "STAR_LONG": {
@@ -173,6 +171,14 @@ def parse_tradingview_message(raw_body: str) -> dict:
                 "stoch_k":       str(data.get("stoch_k", "")),
                 "macd":          str(data.get("macd", "")),
                 "choch":         str(data.get("choch", "")),
+                # 7Hr morning brief fields (London 1AM-8AM candle)
+                "7hr_open":      str(data.get("7hr_open", "")),
+                "7hr_high":      str(data.get("7hr_high", "")),
+                "7hr_low":       str(data.get("7hr_low", "")),
+                "7hr_close":     str(data.get("7hr_close", "")),
+                "7hr_lean":      str(data.get("7hr_lean", "")),
+                "fakeout":       str(data.get("fakeout", "none")),
+                "verdict":       str(data.get("verdict", "")),
                 "raw":           raw_body,
             }
     except (json.JSONDecodeError, ValueError):
@@ -224,13 +230,19 @@ def compute_targets(parsed: dict, direction: str) -> dict:
     ny_l   = safe_float(parsed.get("nyL"))
 
     if direction == "LONG":
+        # First target: London High → NY High
         t1 = ldn_h if ldn_h > price else (ny_h if ny_h > price else 0)
+        # Second target: 200 SMA if above price
         t2 = ma200 if ma200 > price else 0
+        # Final target: 999 EMA if above price
         t3 = ma999 if ma999 > price else 0
         move = (t1 - price) if t1 else 0
     else:
+        # First target: London Low → NY Low
         t1 = ldn_l if ldn_l < price else (ny_l if ny_l < price else 0)
+        # Second target: 200 SMA if below
         t2 = ma200 if ma200 < price else 0
+        # Final target: 999 EMA if below
         t3 = ma999 if ma999 < price else 0
         move = (price - t1) if t1 else 0
 
@@ -326,22 +338,29 @@ def build_telegram_message(parsed: dict, config: dict) -> str:
     regime      = parsed.get("regime", "")
     rvol        = parsed.get("rvol", False)
 
+    # CDV alignment
     cdv_4h  = parsed.get("cdv_4h",  "")
     cdv_1h  = parsed.get("cdv_1h",  "")
     cdv_15m = parsed.get("cdv_15m", "")
     cdv_2m  = parsed.get("cdv_2m",  "")
     cdv_line = f"{cdv_emoji(cdv_4h)}4H {cdv_emoji(cdv_1h)}1H {cdv_emoji(cdv_15m)}15m {cdv_emoji(cdv_2m)}2m"
 
+    # Targets
     targets = compute_targets(parsed, direction)
     strike  = suggest_strike(parsed, direction)
 
+    # MA levels
     ma999 = parsed.get("ma999", "")
     ma200 = parsed.get("ma200", "")
     ma20  = parsed.get("ma20",  "")
 
+    # 200 SMA pattern check
     pattern_warn = check_200_pattern(parsed, direction)
-    read_line    = get_claude_read(parsed, config)
 
+    # Claude read
+    read_line = get_claude_read(parsed, config)
+
+    # Regime tag
     regime_tag = "🟡 BULL DAY" if regime == "BULL" else "🔴 BEAR DAY" if regime == "BEAR" else ""
     rvol_tag   = " | RVOL ✓" if rvol else ""
 
@@ -380,7 +399,7 @@ def build_telegram_message(parsed: dict, config: dict) -> str:
 
 
 # ============================================================
-# === HELPERS
+# === ROUTES
 # ============================================================
 def send_telegram(message: str):
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -389,80 +408,102 @@ def send_telegram(message: str):
     resp.raise_for_status()
 
 
-# ============================================================
-# === SESSION BRIEF — 9AM ET WEEKDAY SCHEDULER
-# ============================================================
-
-BRIEF_PROMPT = """You are Logical Me — SPY session brief system.
-
-PRE-FLIGHT (do this first, do not skip):
-1. Call data_get_pine_tables on the SPY 2min chart.
-2. If the table is empty — stop immediately. Output only:
-   "⚠️ Logical Me isn't painting. Load it on the SPY 2min chart and re-run."
-3. If the table has data — continue.
-
-DATA COLLECTION (read don't reconstruct):
-- Read CDV, levels, and signal data directly from data_get_pine_tables and data_get_pine_labels.
-- Do NOT call data_get_ohlcv to reconstruct anything Logical Me already calculated.
-- Use quote_get for current price only.
-- One targeted news search for macro/catalyst context.
-
-BUILD THE BRIEF:
-- Price, CDV flow, key levels from pine table, news/events, playbook bias.
-- If any section is missing data say so clearly — do not fill in with guesses.
-
-FORMAT (Telegram-ready, no hashtags, no sources block):
-🗓️ [DAY, DATE] · SPY SESSION BRIEF
-━━━━━━━━━━━━━━━━━━━━━
-📍 PRICE: $[price]
-━━━━━━━━━━━━━━━━━━━━━
-📊 FLOW (CDV)
-[cdv alignment across timeframes]
-━━━━━━━━━━━━━━━━━━━━━
-🗺️ MAP
-[key levels from pine table]
-━━━━━━━━━━━━━━━━━━━━━
-📰 NEWS + EVENTS
-[macro bullets]
-━━━━━━━━━━━━━━━━━━━━━
-🎯 PLAYBOOK
-BIAS: [BULL / BEAR / NEUTRAL] — [one sentence why]
-[levels to watch, key triggers]
-━━━━━━━━━━━━━━━━━━━━━"""
-
-
-def run_session_brief():
-    """Called by scheduler at 9:00 AM ET weekdays."""
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": BRIEF_PROMPT}]
-        )
-        brief = response.content[0].text.strip()
-        send_telegram(brief)
-    except Exception as e:
-        try:
-            send_telegram(f"⚠️ Session brief failed: {str(e)}")
-        except Exception:
-            pass
-
-
-# Start scheduler
-scheduler = BackgroundScheduler(timezone="America/New_York")
-scheduler.add_job(run_session_brief, "cron", day_of_week="mon-fri", hour=9, minute=0)
-scheduler.start()
-
-
-# ============================================================
-# === ROUTES
-# ============================================================
 @app.route("/alert", methods=["POST"])
+def build_morning_brief(p):
+    """
+    Builds the 8AM morning post from the MORNING_BRIEF payload.
+    Returns ONE string with Telegram brief + Instagram caption, clearly separated.
+    Data: 7hr wick lean + key levels + CDV stack + verdict.
+    """
+    price   = p.get("price", "?")
+    c7_open = p.get("7hr_open", "?")
+    c7_high = p.get("7hr_high", "?")
+    c7_low  = p.get("7hr_low", "?")
+    c7_lean = str(p.get("7hr_lean", "neutral")).upper()
+    regime  = str(p.get("regime", "?")).upper()
+    ma999   = p.get("ma999", "?")
+    ma200   = p.get("ma200", "?")
+    ldnH    = p.get("ldnH", "?")
+    ldnL    = p.get("ldnL", "?")
+    cdv_4h  = str(p.get("cdv_4h", "?")).upper()
+    cdv_1h  = str(p.get("cdv_1h", "?")).upper()
+    cdv_15m = str(p.get("cdv_15m", "?")).upper()
+    fakeout = p.get("fakeout", "none")
+    verdict = p.get("verdict", "?")
+
+    # CDV alignment read
+    greens = [cdv_4h, cdv_1h, cdv_15m].count("GREEN")
+    reds   = [cdv_4h, cdv_1h, cdv_15m].count("RED")
+    if greens == 3:
+        align = "all GREEN — long bias"
+    elif reds == 3:
+        align = "all RED — short bias"
+    else:
+        align = "MIXED — wait for alignment"
+
+    def light(v):
+        return "🟢" if v == "GREEN" else "🔴"
+
+    lean_emoji = "🐂" if c7_lean == "LONG" else "🐻" if c7_lean == "SHORT" else "⏸"
+
+    # ---- TELEGRAM BRIEF ----
+    tg = (
+        f"🗓️ <b>SPY MORNING BRIEF — 8AM</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📍 Price: <b>${price}</b>\n\n"
+        f"{lean_emoji} <b>7Hr WICK (London 1AM-8AM)</b>\n"
+        f"Lean: <b>{c7_lean}</b>\n"
+        f"Range: ${c7_low} – ${c7_high}\n\n"
+        f"📊 <b>CDV STACK</b>\n"
+        f"4H {light(cdv_4h)}  1H {light(cdv_1h)}  15m {light(cdv_15m)}\n"
+        f"➤ {align}\n\n"
+        f"🗺️ <b>KEY LEVELS</b>\n"
+        f"Battlefield (999): ${ma999}\n"
+        f"200 SMA: ${ma200}\n"
+        f"London H/L: ${ldnH} / ${ldnL}\n\n"
+        f"🎯 <b>VERDICT</b>\n"
+        f"{verdict}\n"
+    )
+    if fakeout and fakeout != "none":
+        tg += f"\n⚠️ <b>FAKE-OUT:</b> {fakeout}\n"
+    tg += (
+        f"━━━━━━━━━━━━━━━\n"
+        f"<i>8AM lean has a shelf life — watch the live CDV stack as the day develops.</i>"
+    )
+
+    # ---- INSTAGRAM CAPTION ----
+    ig = (
+        f"———————————————\n"
+        f"📋 <b>INSTAGRAM CAPTION (copy below)</b>\n"
+        f"———————————————\n\n"
+        f"🗓️ SPY SESSION BRIEF\n"
+        f"📍 ${price}\n\n"
+        f"7Hr Lean: {c7_lean}\n"
+        f"CDV: {align}\n\n"
+        f"Battlefield ${ma999} | 200 ${ma200}\n"
+        f"Range ${ldnL}–${ldnH}\n\n"
+        f"Plan: {verdict}\n\n"
+        f"#SPY #SP500 #OptionsTrading #LogicalMe #DayTrading #0DTE"
+    )
+
+    return tg + "\n\n" + ig
+
+
 def receive_alert():
     try:
         raw_body    = request.data.decode("utf-8")
         parsed      = parse_tradingview_message(raw_body)
         signal_type = parsed.get("signal_type", "UNKNOWN")
+
+        # === MORNING BRIEF — 8AM London-candle-lock post ===
+        if signal_type == "MORNING_BRIEF":
+            # Stash for the EOD recap so it can compare AM lean vs PM close
+            global LAST_MORNING_BRIEF
+            LAST_MORNING_BRIEF = dict(parsed)
+            message = build_morning_brief(parsed)
+            send_telegram(message)
+            return jsonify({"status": "ok", "signal": "MORNING_BRIEF"}), 200
+
         config      = SIGNAL_CONFIG.get(signal_type)
 
         if not config:
@@ -484,16 +525,6 @@ def receive_alert():
             send_telegram(error_msg)
         except Exception:
             pass
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.route("/run-brief", methods=["POST", "GET"])
-def trigger_brief():
-    """Manual trigger endpoint — GET or POST to fire brief immediately."""
-    try:
-        run_session_brief()
-        return jsonify({"status": "brief sent"}), 200
-    except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -554,12 +585,233 @@ def test():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "status":            "Logical Me v11 Signal Server",
+        "status":            "Logical Me v13 Signal Server",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
         "model":             "claude-sonnet-4-6",
-        "version":           "v11",
-        "brief_schedule":    "9:00 AM ET weekdays",
+        "version":           "v13",
+        "extra_endpoints":   ["/recap (POST your trades)", "MORNING_BRIEF (8AM auto)"],
     }), 200
+
+
+# ============================================================
+# === END-OF-DAY RECAP — market wrap + your trades + IG caption
+# POST JSON to /recap like:
+# {
+#   "spy_open": 745.10, "spy_high": 746.87, "spy_low": 738.10, "spy_close": 739.22,
+#   "regime": "BEAR", "note": "999 rejection flipped AM long to PM short",
+#   "trades": [
+#     {"sym": "746C", "buy": 0.63, "sell": 1.06},
+#     {"sym": "748P", "buy": 0.51, "sell": 1.48}
+#   ]
+# }
+# ============================================================
+def build_eod_recap(p):
+    spy_open  = p.get("spy_open")
+    spy_high  = p.get("spy_high")
+    spy_low   = p.get("spy_low")
+    spy_close = p.get("spy_close")
+    regime    = str(p.get("regime", "")).upper()
+    note      = p.get("note", "")
+    trades    = p.get("trades", [])
+
+    # Day direction
+    arrow = "🟢" if (spy_close and spy_open and spy_close >= spy_open) else "🔴"
+    try:
+        chg = round(spy_close - spy_open, 2)
+        chg_pct = round((spy_close - spy_open) / spy_open * 100, 2)
+        chg_str = f"{'+' if chg >= 0 else ''}{chg} ({'+' if chg_pct >= 0 else ''}{chg_pct}%)"
+    except Exception:
+        chg_str = ""
+
+    # ---- Trade results ----
+    trade_lines_tg = []
+    trade_lines_ig = []
+    total_pl = 0.0
+    wins = 0
+    for t in trades:
+        sym  = t.get("sym", "?")
+        buy  = t.get("buy")
+        sell = t.get("sell")
+        try:
+            pl  = round(sell - buy, 2)
+            ret = round((sell - buy) / buy * 100, 0)
+            total_pl += pl
+            if pl > 0:
+                wins += 1
+            res = "🟢" if pl >= 0 else "🔴"
+            trade_lines_tg.append(f"{res} {sym}: ${buy} → ${sell}  ({'+' if ret>=0 else ''}{ret:.0f}%, {'+' if pl>=0 else ''}${pl})")
+            trade_lines_ig.append(f"{sym} {'+' if ret>=0 else ''}{ret:.0f}%")
+        except Exception:
+            trade_lines_tg.append(f"• {sym}")
+            trade_lines_ig.append(f"{sym}")
+
+    record = f"{wins}/{len(trades)} green" if trades else "no trades logged"
+
+    # ---- TELEGRAM ----
+    tg = (
+        f"🔔 <b>SPY END-OF-DAY RECAP</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{arrow} <b>MARKET WRAP</b>\n"
+        f"Open ${spy_open} → Close <b>${spy_close}</b>  {chg_str}\n"
+        f"Range: ${spy_low} – ${spy_high}\n"
+        f"Regime: {regime}\n"
+    )
+    if note:
+        tg += f"📝 {note}\n"
+    tg += f"\n💼 <b>MY TRADES</b> ({record})\n"
+    tg += ("\n".join(trade_lines_tg) if trade_lines_tg else "No trades today")
+    if trades:
+        tg += f"\n\n<b>Net: {'+' if total_pl>=0 else ''}${round(total_pl,2)}/contract</b>"
+    tg += "\n━━━━━━━━━━━━━━━"
+
+    # ---- INSTAGRAM ----
+    ig = (
+        f"\n\n———————————————\n"
+        f"📋 <b>INSTAGRAM CAPTION (copy below)</b>\n"
+        f"———————————————\n\n"
+        f"📊 SPY DAILY RECAP\n"
+        f"{arrow} ${spy_close} {chg_str}\n"
+        f"Range ${spy_low}–${spy_high}\n\n"
+    )
+    if note:
+        ig += f"{note}\n\n"
+    if trade_lines_ig:
+        ig += "Trades: " + "  |  ".join(trade_lines_ig) + "\n\n"
+    ig += "#SPY #SP500 #OptionsTrading #LogicalMe #DayTrading #0DTE #Trading"
+
+    return tg + ig
+
+
+# ============================================================
+# === AUTO-NOTE — write the day's story by comparing AM brief vs close
+# ============================================================
+# We remember the last MORNING_BRIEF so /recap can compare it to the close.
+LAST_MORNING_BRIEF = {}
+
+
+def auto_generate_note(spy_open, spy_close, spy_high, spy_low):
+    """Compare the morning's 7Hr lean to how the day actually closed.
+    Returns a one-line story like:
+      'Bull morning, rejected at high, dumped to BEAR PM close'
+      'Clean trend day - opened weak, closed weaker'
+    """
+    if not (spy_open and spy_close):
+        return ""
+
+    mb       = LAST_MORNING_BRIEF or {}
+    am_lean  = str(mb.get("7hr_lean", "")).upper()  # LONG / SHORT / neutral
+    am_ma999 = mb.get("ma999")
+    fakeout  = str(mb.get("fakeout", "none"))
+
+    day_dir   = "up" if spy_close > spy_open else "down" if spy_close < spy_open else "flat"
+    closed_above_999 = (am_ma999 is not None and spy_close is not None and spy_close > float(am_ma999))
+
+    parts = []
+
+    # AM lean vs PM close - the key comparison
+    if am_lean == "LONG" and day_dir == "down":
+        parts.append("Bull morning trapped - rejected and dumped to bearish PM")
+    elif am_lean == "SHORT" and day_dir == "up":
+        parts.append("Bear morning trapped - reclaimed and ripped to bullish PM")
+    elif am_lean == "LONG" and day_dir == "up":
+        parts.append("Clean bull day - AM lean confirmed, trend held")
+    elif am_lean == "SHORT" and day_dir == "down":
+        parts.append("Clean bear day - AM lean confirmed, trend held")
+    else:
+        # No brief data - generic wrap
+        if day_dir == "up":
+            parts.append("SPY closed higher on the day")
+        elif day_dir == "down":
+            parts.append("SPY closed lower on the day")
+        else:
+            parts.append("SPY closed flat")
+
+    # 999 context if we have it
+    if am_ma999 is not None and spy_close is not None:
+        if closed_above_999:
+            parts.append("closed above 999 EMA")
+        else:
+            parts.append("closed below 999 EMA")
+
+    # Range note - did it sweep
+    try:
+        rng = float(spy_high) - float(spy_low)
+        if rng > 8:
+            parts.append("wide range session")
+    except Exception:
+        pass
+
+    # Fake-out flag from the morning
+    if fakeout and fakeout != "none" and "TRAP" in fakeout:
+        parts.append("Fake-Out flag fired AM")
+
+    return " - ".join(parts)
+
+
+def fetch_spy_quote():
+    """Pull today's SPY open/high/low/close from FMP. Returns dict or None."""
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        return None
+    try:
+        url = f"https://financialmodelingprep.com/stable/quote?symbol=SPY&apikey={api_key}"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        arr = resp.json()
+        if not arr or not isinstance(arr, list):
+            return None
+        q = arr[0]
+        return {
+            "spy_open":  q.get("open"),
+            "spy_high":  q.get("dayHigh"),
+            "spy_low":   q.get("dayLow"),
+            "spy_close": q.get("price"),
+        }
+    except Exception:
+        return None
+
+
+@app.route("/recap", methods=["POST"])
+def recap():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        # Auto-fill SPY data from FMP if user did not provide it
+        if not data.get("spy_close"):
+            quote = fetch_spy_quote()
+            if quote:
+                data = {**quote, **data}  # user-provided fields override
+
+        # Auto-derive regime from close vs 999 EMA (from morning brief)
+        if not data.get("regime"):
+            try:
+                ma999 = float((LAST_MORNING_BRIEF or {}).get("ma999", 0))
+                close = float(data.get("spy_close", 0))
+                if ma999 and close:
+                    data["regime"] = "BULL" if close > ma999 else "BEAR"
+            except Exception:
+                pass
+
+        # Auto-generate the day's story note
+        if not data.get("note"):
+            try:
+                data["note"] = auto_generate_note(
+                    float(data.get("spy_open", 0)) or None,
+                    float(data.get("spy_close", 0)) or None,
+                    float(data.get("spy_high", 0)) or None,
+                    float(data.get("spy_low", 0)) or None,
+                )
+            except Exception:
+                pass
+
+        message = build_eod_recap(data)
+        send_telegram(message)
+        return jsonify({"status": "ok", "recap": "sent"}), 200
+    except Exception as e:
+        try:
+            send_telegram(f"⚠️ Recap error: {str(e)}")
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
