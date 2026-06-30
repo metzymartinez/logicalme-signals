@@ -408,7 +408,6 @@ def send_telegram(message: str):
     resp.raise_for_status()
 
 
-@app.route("/alert", methods=["POST"])
 def build_morning_brief(p):
     """
     Builds the 8AM morning post from the MORNING_BRIEF payload.
@@ -489,6 +488,7 @@ def build_morning_brief(p):
     return tg + "\n\n" + ig
 
 
+@app.route("/alert", methods=["POST"])
 def receive_alert():
     try:
         raw_body    = request.data.decode("utf-8")
@@ -585,10 +585,10 @@ def test():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "status":            "Logical Me v13 Signal Server",
+        "status":            "Logical Me v16 Signal Server",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
         "model":             "claude-sonnet-4-6",
-        "version":           "v13",
+        "version":           "v16",
         "extra_endpoints":   ["/recap (POST your trades)", "MORNING_BRIEF (8AM auto)"],
     }), 200
 
