@@ -6,6 +6,20 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# Anthropic client is used ONLY for the two once-a-day narrative posts
+# (8AM morning brief + EOD recap). The intraday alert path is 100%
+# deterministic templating and never touches the API. Client is created
+# lazily so the server still boots if the key is absent.
+_anthropic_client = None
+def _get_anthropic():
+    global _anthropic_client
+    if _anthropic_client is None:
+        from anthropic import Anthropic
+        _anthropic_client = Anthropic()
+    return _anthropic_client
+
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -540,6 +554,12 @@ def build_morning_brief(p):
     )
     if fakeout and fakeout != "none":
         tg += f"\n⚠️ <b>FAKE-OUT:</b> {fakeout}\n"
+
+    # API-written narrative read (once a day — this is where a synthesis earns its cost)
+    narrative = get_brief_narrative(p)
+    if narrative:
+        tg += f"\n🧠 <b>READ</b>\n{narrative}\n"
+
     tg += (
         f"━━━━━━━━━━━━━━━\n"
         f"<i>8AM lean has a shelf life — watch the live CDV stack as the day develops.</i>"
@@ -560,6 +580,73 @@ def build_morning_brief(p):
     )
 
     return tg + "\n\n" + ig
+
+
+def get_brief_narrative(p) -> str:
+    """ONE narrative paragraph for the 8AM brief. Uses the API.
+    Falls back to a deterministic line if the call fails — a billing
+    problem can never kill the post."""
+    c7_lean = str(p.get("7hr_lean", "neutral")).upper()
+    regime  = str(p.get("regime", "")).upper()
+    cdv_4h  = str(p.get("cdv_4h", "")).upper()
+    cdv_1h  = str(p.get("cdv_1h", "")).upper()
+    cdv_15m = str(p.get("cdv_15m", "")).upper()
+    verdict = p.get("verdict", "")
+    fakeout = p.get("fakeout", "none")
+
+    prompt = f"""You are Logical Me, an intraday SPY options system (Oliver Velez Pristine + CDV + 999 EMA + AMD bias).
+It is 8AM ET. Write ONE tight paragraph (max 45 words) framing the day for the trader.
+
+London 7Hr wick lean: {c7_lean}
+Regime (vs 999 EMA): {regime}
+CDV stack 4H/1H/15m: {cdv_4h}/{cdv_1h}/{cdv_15m}
+Fake-Out flag: {fakeout}
+Pine verdict: {verdict}
+
+Be specific and directional. No hype, no emojis, no disclaimers. Just the read."""
+
+    try:
+        client = _get_anthropic()
+        resp = client.messages.create(
+            model=ANTHROPIC_MODEL, max_tokens=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        notify_error_once(f"AM brief narrative fell back to template: {str(e)}")
+        greens = [cdv_4h, cdv_1h, cdv_15m].count("GREEN")
+        reds   = [cdv_4h, cdv_1h, cdv_15m].count("RED")
+        stack = "aligned long" if greens == 3 else "aligned short" if reds == 3 else "mixed — wait for alignment"
+        return f"{c7_lean} lean into a {regime} regime, CDV {stack}. {verdict}"
+
+
+def get_recap_narrative(data) -> str:
+    """ONE narrative paragraph for the EOD recap. Uses the API.
+    Falls back to the existing auto_generate_note() if the call fails."""
+    prompt = f"""You are Logical Me, an intraday SPY options system. Write ONE tight paragraph (max 45 words)
+recapping how SPY actually traded today versus the morning lean.
+
+Open: {data.get('spy_open')} High: {data.get('spy_high')} Low: {data.get('spy_low')} Close: {data.get('spy_close')}
+Regime: {data.get('regime')}
+Morning 7Hr lean was: {str((LAST_MORNING_BRIEF or {}).get('7hr_lean','')).upper()}
+
+Say whether the morning lean paid off or trapped, and the character of the day. No hype, no emojis, no disclaimers."""
+
+    try:
+        client = _get_anthropic()
+        resp = client.messages.create(
+            model=ANTHROPIC_MODEL, max_tokens=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        notify_error_once(f"Recap narrative fell back to template: {str(e)}")
+        return auto_generate_note(
+            safe_float(data.get("spy_open")) or None,
+            safe_float(data.get("spy_close")) or None,
+            safe_float(data.get("spy_high")) or None,
+            safe_float(data.get("spy_low")) or None,
+        )
 
 
 @app.route("/alert", methods=["POST"])
@@ -643,7 +730,7 @@ def home():
     return jsonify({
         "status":            "Logical Me v18.3 Signal Server",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
-        "api":               "none — deterministic tape read (no credits)",
+        "api":               "hybrid — intraday alerts template-only (no credits); AM brief + EOD recap use API (2 calls/day)",
         "version":           "v18.3",
         "extra_endpoints":   ["/recap (POST trades)", "/run-brief (manual AM brief)", "MORNING_BRIEF (auto)"],
     }), 200
@@ -811,15 +898,9 @@ def recap():
             except Exception:
                 pass
         if not data.get("note"):
-            try:
-                data["note"] = auto_generate_note(
-                    float(data.get("spy_open", 0)) or None,
-                    float(data.get("spy_close", 0)) or None,
-                    float(data.get("spy_high", 0)) or None,
-                    float(data.get("spy_low", 0)) or None,
-                )
-            except Exception:
-                pass
+            # API-written recap narrative (once a day); falls back to
+            # auto_generate_note() internally if the call fails.
+            data["note"] = get_recap_narrative(data)
         message = build_eod_recap(data)
         send_telegram(message)
         return jsonify({"status": "ok", "recap": "sent"}), 200
