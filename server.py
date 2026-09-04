@@ -800,7 +800,11 @@ def build_morning_brief(p):
 
 
 def post_morning_brief(p):
-    """Send the brief as two Telegram messages (brief, then caption)."""
+    """Send the brief as two Telegram messages (brief, then caption).
+    Refreshes price at post time so the 8:45 brief reflects any 8:30 print."""
+    q = fetch_spy_quote()
+    if q and q.get("spy_close"):
+        p = {**p, "price": str(q["spy_close"])}
     tg, ig = build_morning_brief(p)
     send_telegram(tg[:4000])
     try:
@@ -847,10 +851,10 @@ def receive_alert():
 
         # === MORNING BRIEF — 8AM London-candle-lock post ===
         if signal_type == "MORNING_BRIEF":
+            # Stash only — the 8:45 ET scheduler posts it (one post, one API call).
             global LAST_MORNING_BRIEF
             LAST_MORNING_BRIEF = dict(parsed)
-            post_morning_brief(parsed)
-            return jsonify({"status": "ok", "signal": "MORNING_BRIEF"}), 200
+            return jsonify({"status": "ok", "signal": "MORNING_BRIEF", "stashed": True}), 200
 
         config = SIGNAL_CONFIG.get(signal_type)
 
@@ -1098,7 +1102,7 @@ def recap():
 
 
 # ============================================================
-# === MANUAL AM BRIEF TRIGGER + 9:00 ET SCHEDULER
+# === MANUAL AM BRIEF TRIGGER + 8:45 ET SCHEDULER
 # ============================================================
 def run_morning_brief_job():
     """Fires the AM brief from the last stashed MORNING_BRIEF payload.
@@ -1121,7 +1125,7 @@ def run_brief():
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     scheduler = BackgroundScheduler(timezone="America/New_York")
-    scheduler.add_job(run_morning_brief_job, "cron", day_of_week="mon-fri", hour=9, minute=0)
+    scheduler.add_job(run_morning_brief_job, "cron", day_of_week="mon-fri", hour=8, minute=45)
     scheduler.start()
 except Exception as _sched_err:
     print(f"[scheduler] not started: {_sched_err}")
