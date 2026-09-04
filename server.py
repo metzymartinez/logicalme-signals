@@ -1125,7 +1125,7 @@ def run_brief():
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     scheduler = BackgroundScheduler(timezone="America/New_York")
-    scheduler.add_job(run_morning_brief_job, "cron", day_of_week="mon-fri", hour=8, minute=45)
+    scheduler.add_job(run_morning_brief_job, "cron", day_of_week="mon-fri", hour=8, minute=50)
     scheduler.start()
 except Exception as _sched_err:
     print(f"[scheduler] not started: {_sched_err}")
