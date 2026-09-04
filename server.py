@@ -735,7 +735,10 @@ def build_morning_brief(p):
     if earn:
         tg += "💼 <b>EARNINGS</b>\n" + "\n".join(f"• {x}" for x in earn[:4]) + "\n\n"
 
-    tg += (
+    if ma999 == "?" and ma200 == "?":
+        tg += "🗺️ <b>KEY LEVELS</b>\n⚠️ Pine payload not received — check the TradingView MORNING_BRIEF alert.\n\n"
+    else:
+        tg += (
         f"{lean_emoji} <b>7Hr WICK (London 1AM–8AM)</b>\n"
         f"Lean: <b>{c7_lean}</b>\n"
         f"{range_line}\n\n"
@@ -784,12 +787,13 @@ def build_morning_brief(p):
     )
     if top_ev:
         ig += f"Watch: {top_ev.get('time','')} {top_ev.get('event','')}\n"
-    ig += (
-        f"7Hr Lean: {c7_lean}\n"
-        f"CDV: {align}\n\n"
-        f"Battlefield ${ma999} | 200 ${ma200}\n"
-        f"London ${ldnL}–${ldnH}\n\n"
-    )
+    if ma999 != "?":
+        ig += (
+            f"7Hr Lean: {c7_lean}\n"
+            f"CDV: {align}\n\n"
+            f"Battlefield ${ma999} | 200 ${ma200}\n"
+            f"London ${ldnL}–${ldnH}\n\n"
+        )
     if plan:
         ig += f"Plan: {plan[0]}\n\n"
     else:
@@ -854,6 +858,7 @@ def receive_alert():
             # Stash only — the 8:45 ET scheduler posts it (one post, one API call).
             global LAST_MORNING_BRIEF
             LAST_MORNING_BRIEF = dict(parsed)
+            _stash_save(parsed)
             return jsonify({"status": "ok", "signal": "MORNING_BRIEF", "stashed": True}), 200
 
         config = SIGNAL_CONFIG.get(signal_type)
@@ -1102,16 +1107,52 @@ def recap():
 
 
 # ============================================================
-# === MANUAL AM BRIEF TRIGGER + 8:45 ET SCHEDULER
+# === MANUAL AM BRIEF TRIGGER + ET SCHEDULER (BRIEF_TIMES)
 # ============================================================
-def run_morning_brief_job():
-    """Fires the AM brief from the last stashed MORNING_BRIEF payload.
-    If none stashed yet, sends a short heads-up instead of crashing."""
+STASH_PATH = os.environ.get("BRIEF_STASH_PATH", "/tmp/last_morning_brief.json")
+
+def _stash_save(p: dict):
+    """Persist the 8AM payload to disk so the 8:45 scheduler finds it even if
+    it runs in a different gunicorn worker than the one that received the alert."""
     try:
-        if LAST_MORNING_BRIEF:
-            post_morning_brief(LAST_MORNING_BRIEF)
-        else:
-            send_telegram("🗓️ Morning brief scheduled, but no MORNING_BRIEF payload received yet today.")
+        d = {k: v for k, v in p.items() if k != "raw"}
+        d["_stashed_et"] = _now_et().strftime("%Y-%m-%d %H:%M")
+        with open(STASH_PATH, "w") as f:
+            json.dump(d, f)
+    except Exception as e:
+        notify_error_once(f"Stash save failed: {str(e)[:120]}")
+
+
+def _stash_load() -> dict:
+    """Return today's stashed payload (memory first, then disk), else {}."""
+    today = _now_et().strftime("%Y-%m-%d")
+    if LAST_MORNING_BRIEF and str(LAST_MORNING_BRIEF.get("_stashed_et", today)).startswith(today):
+        return LAST_MORNING_BRIEF
+    try:
+        with open(STASH_PATH) as f:
+            d = json.load(f)
+        if str(d.get("_stashed_et", "")).startswith(today):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def run_morning_brief_job():
+    """Fires the AM brief from today's stashed MORNING_BRIEF payload.
+    If none arrived (Pine alert missed, redeploy after 8AM, worker mismatch),
+    posts a macro-only brief from a live quote instead of skipping the day."""
+    try:
+        p = _stash_load()
+        if not p:
+            q = fetch_spy_quote() or {}
+            if not q.get("spy_close"):
+                send_telegram("🗓️ Morning brief: no MORNING_BRIEF payload today and no live quote — skipped.")
+                return
+            p = {"price": str(q["spy_close"]), "verdict": "NO PINE PAYLOAD — levels unavailable",
+                 "regime": "", "7hr_lean": ""}
+            notify_error_once("AM brief: Pine MORNING_BRIEF payload not received — posted macro-only brief.")
+        post_morning_brief(p)
     except Exception as e:
         notify_error_once(f"AM brief job error: {str(e)}")
 
@@ -1125,7 +1166,14 @@ def run_brief():
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     scheduler = BackgroundScheduler(timezone="America/New_York")
-    scheduler.add_job(run_morning_brief_job, "cron", day_of_week="mon-fri", hour=8, minute=50)
+    # Fire times (ET), comma-separated H:MM. Override in Render env without a redeploy:
+    #   BRIEF_TIMES=8:45          (production)
+    #   BRIEF_TIMES=8:05,9:00     (test: early run + post-8:30-print run)
+    _times = os.environ.get("BRIEF_TIMES", "8:05,9:00")
+    for _t in _times.split(","):
+        _h, _m = _t.strip().split(":")
+        scheduler.add_job(run_morning_brief_job, "cron", day_of_week="mon-fri",
+                          hour=int(_h), minute=int(_m), id=f"brief_{_h}{_m}")
     scheduler.start()
 except Exception as _sched_err:
     print(f"[scheduler] not started: {_sched_err}")
