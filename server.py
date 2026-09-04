@@ -501,123 +501,312 @@ def notify_error_once(err_text: str):
         pass
 
 
+# ============================================================
+# === 8AM MORNING BRIEF — macro + calendar + levels (v19)
+# ============================================================
+# ONE Anthropic call per morning. The API's server-side web_fetch /
+# web_search tools pull the economic calendar (ForexFactory), the
+# earnings calendar (Earnings Whispers) and overnight headlines INSIDE
+# that single request, then return strict JSON. Chart levels always
+# come from the Pine payload, never from the web. If the call fails
+# for any reason the brief still posts from a deterministic template.
+
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except Exception:
+    _ET = None
+
+BRIEF_CALENDAR_URL = "https://www.forexfactory.com/calendar?day=today"
+BRIEF_EARNINGS_URL = "https://beta.earningswhispers.com/"
+
+# Index-moving names: only these (and top-30 S&P weights) get an earnings line.
+BRIEF_MEGACAPS = ("AAPL MSFT NVDA AMZN GOOGL GOOG META AVGO TSLA BRK.B JPM LLY V UNH XOM "
+                  "MA COST HD PG JNJ NFLX WMT ABBV BAC CRM ORCL CVX KO AMD MRK PEP ADBE CSCO")
+
+BRIEF_TOOLS = [
+    {
+        "type": "web_fetch_20260318",
+        "name": "web_fetch",
+        "max_uses": 4,
+        "use_cache": False,
+        "max_content_tokens": 20000,
+        "allowed_domains": ["forexfactory.com", "www.forexfactory.com",
+                            "earningswhispers.com", "beta.earningswhispers.com",
+                            "www.earningswhispers.com"],
+    },
+    {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 2,
+    },
+]
+
+BRIEF_SYSTEM = """You are Logical Me, an intraday SPY 0DTE options system (Oliver Velez Pristine + CDV + 999 EMA battlefield + ICT AMD bias + Volume Profile).
+You write the 8AM ET pre-market brief. You are terse, specific, directional. No hype, no emojis, no disclaimers, no markdown.
+
+RULES
+- All times in ET, 12-hour, no leading zero (8:30, 10:00, 2:00). Convert from the source's timezone if needed; if the source timezone is unclear, use standard US release times (NFP/CPI/PPI/Retail Sales/PCE 8:30, ISM/JOLTS/UMich 10:00, Treasury auctions 1:00, FOMC decision 2:00, minutes 2:00).
+- Economic calendar: US events only, high or medium impact. Include consensus and prior when shown. Tier: RED = NFP, CPI, PPI, PCE, FOMC decision/minutes, GDP advance, Powell speech. YELLOW = ISM, retail sales, JOLTS, claims on a quiet day, UMich, Treasury auctions 10Y/30Y, other Fed speakers. Drop everything else.
+- Earnings: only names in the MEGACAP list or top-30 S&P weights, before-open today or after-close yesterday/today. If none, say so in one line. Note when last night's reports are already priced into ES.
+- Overnight: what moved while the trader slept — ES vs prior close and gap direction, Asia/Europe tone, DXY, 10Y, VIX, crude, one geopolitical/policy headline if it matters to index risk. Max 5 lines, each under 12 words.
+- Plan: if/then lines using the chart levels supplied, in this exact style: "Above 773.25 + 1H CDV flip green -> longs toward 778.84". Give one long trigger, one short trigger, one no-trade condition. Add a no-trade window for every RED event (event time minus 5 to plus 15 minutes) and for the first 5 minutes after the open when a RED print lands pre-market.
+- Read: ONE paragraph, max 45 words, framing the day: macro driver + structure + what confirms direction.
+- Never invent numbers. If a fetch fails, set the section's "note" to what failed and keep the rest.
+
+OUTPUT: respond with ONLY a JSON object, no prose before or after, no code fences:
+{
+  "overnight": ["line", ...],
+  "calendar": [{"time":"8:30","event":"NFP","exp":"+150K","prior":"+73K","tier":"RED"}, ...],
+  "calendar_note": "",
+  "earnings": ["line", ...],
+  "plan": ["line", ...],
+  "no_trade": ["8:25-8:45 NFP", ...],
+  "read": "paragraph"
+}"""
+
+
+def _now_et():
+    try:
+        return datetime.now(_ET) if _ET else datetime.now()
+    except Exception:
+        return datetime.now()
+
+
+def _brief_levels_json(p) -> dict:
+    keys = ("price", "ma999", "ma200", "ma33", "ma20", "ma8", "ldnH", "ldnL",
+            "yPOC", "yVAH", "yVAL", "dPOC", "regime", "bias", "vix", "vix_regime",
+            "cdv_4h", "cdv_1h", "cdv_15m", "7hr_open", "7hr_high", "7hr_low",
+            "7hr_close", "7hr_lean", "fakeout", "verdict", "node_state")
+    return {k: p.get(k, "") for k in keys if str(p.get(k, "")).strip() not in ("", "none")}
+
+
+def _extract_json(text: str) -> dict:
+    text = text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    start = text.find("{")
+    end   = text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("no JSON object in narrative response")
+    return json.loads(text[start:end + 1])
+
+
+def _html_safe(obj):
+    """Escape model text so a stray '<' or '&' can't break Telegram HTML parse."""
+    import html as _html
+    if isinstance(obj, str):
+        return _html.escape(obj, quote=False)
+    if isinstance(obj, list):
+        return [_html_safe(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _html_safe(v) for k, v in obj.items()}
+    return obj
+
+
+def get_brief_intel(p) -> dict | None:
+    """ONE API call. Returns the parsed JSON dict, or None on any failure."""
+    now = _now_et()
+    user = f"""Today is {now.strftime('%A, %B %d, %Y')}, it is {now.strftime('%-I:%M %p')} ET.
+
+STEP 1 - fetch the US economic calendar: {BRIEF_CALENDAR_URL}
+STEP 2 - fetch the earnings calendar: {BRIEF_EARNINGS_URL}
+STEP 3 - web_search once for "stock market futures today" for the overnight tape (ES, DXY, 10Y, VIX, crude, headline).
+STEP 4 - build the brief JSON.
+
+MEGACAP list: {BRIEF_MEGACAPS}
+
+Chart data from the Pine payload (authoritative for every level; do not replace with web numbers):
+{json.dumps(_brief_levels_json(p), indent=1)}"""
+
+    try:
+        client = _get_anthropic()
+        resp = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=1800,
+            system=BRIEF_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+            tools=BRIEF_TOOLS,
+        )
+        texts = [b.text for b in resp.content if getattr(b, "type", "") == "text" and getattr(b, "text", "").strip()]
+        if not texts:
+            raise ValueError("no text block in response")
+        # The JSON is the final text block; earlier text blocks are tool-call chatter.
+        for t in reversed(texts):
+            try:
+                return _html_safe(_extract_json(t))
+            except Exception:
+                continue
+        raise ValueError("no parseable JSON block")
+    except Exception as e:
+        notify_error_once(f"AM brief intel failed, posted template only: {str(e)[:200]}")
+        return None
+
+
+def _tier_dot(tier: str) -> str:
+    t = str(tier).upper()
+    return "🔴" if t == "RED" else "🟡" if t == "YELLOW" else "⚪"
+
+
+def _sane_range(price, lo, hi) -> bool:
+    """Reject extended-hours print pollution (e.g. a $49 overnight SPY range)."""
+    pr, l, h = safe_float(price), safe_float(lo), safe_float(hi)
+    if not pr or not l or not h or h <= l:
+        return False
+    return (h - l) / pr <= 0.025
+
+
 def build_morning_brief(p):
     """
-    Builds the 8AM morning post from the MORNING_BRIEF payload.
-    Returns ONE string with Telegram brief + Instagram caption, clearly separated.
+    Builds the 8AM post. Returns (telegram_html, instagram_caption) as two
+    separate strings so they post as two Telegram messages.
     """
-    price   = p.get("price", "?")
-    c7_high = p.get("7hr_high", "?")
-    c7_low  = p.get("7hr_low", "?")
-    c7_lean = str(p.get("7hr_lean", "neutral")).upper()
-    regime  = str(p.get("regime", "?")).upper()
-    ma999   = p.get("ma999", "?")
-    ma200   = p.get("ma200", "?")
-    ldnH    = p.get("ldnH", "?")
-    ldnL    = p.get("ldnL", "?")
-    cdv_4h  = str(p.get("cdv_4h", "?")).upper()
-    cdv_1h  = str(p.get("cdv_1h", "?")).upper()
-    cdv_15m = str(p.get("cdv_15m", "?")).upper()
-    fakeout = p.get("fakeout", "none")
-    verdict = p.get("verdict", "?")
+    now      = _now_et()
+    stamp    = now.strftime("%-I:%M %p ET")
+    price    = p.get("price", "?")
+    c7_high  = p.get("7hr_high", "?")
+    c7_low   = p.get("7hr_low", "?")
+    c7_lean  = str(p.get("7hr_lean", "")).upper() or "NEUTRAL"
+    regime   = str(p.get("regime", "?")).upper()
+    bias     = str(p.get("bias", "")).upper()
+    ma999    = p.get("ma999", "?")
+    ma200    = p.get("ma200", "?")
+    ldnH     = p.get("ldnH", "?")
+    ldnL     = p.get("ldnL", "?")
+    yPOC     = p.get("yPOC", "")
+    yVAH     = p.get("yVAH", "")
+    yVAL     = p.get("yVAL", "")
+    vix      = p.get("vix", "")
+    vix_reg  = p.get("vix_regime", "")
+    cdv_4h   = str(p.get("cdv_4h", "?")).upper()
+    cdv_1h   = str(p.get("cdv_1h", "?")).upper()
+    cdv_15m  = str(p.get("cdv_15m", "?")).upper()
+    fakeout  = p.get("fakeout", "none")
+    verdict  = p.get("verdict", "?")
 
     greens = [cdv_4h, cdv_1h, cdv_15m].count("GREEN")
     reds   = [cdv_4h, cdv_1h, cdv_15m].count("RED")
-    if greens == 3:
-        align = "all GREEN — long bias"
-    elif reds == 3:
-        align = "all RED — short bias"
-    else:
-        align = "MIXED — wait for alignment"
+    align  = ("all GREEN — long bias" if greens == 3 else
+              "all RED — short bias"  if reds == 3 else
+              "MIXED — wait for alignment")
 
     def light(v):
         return "🟢" if v == "GREEN" else "🔴"
 
     lean_emoji = "🐂" if c7_lean == "LONG" else "🐻" if c7_lean == "SHORT" else "⏸"
+    if _sane_range(price, c7_low, c7_high):
+        range_line = f"Range: ${c7_low} – ${c7_high}"
+    else:
+        range_line = "Range: ⚠️ data suspect (extended-hours print) — using London H/L"
 
-    tg = (
-        f"🗓️ <b>SPY MORNING BRIEF — 8AM</b>\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📍 Price: <b>${price}</b>\n\n"
-        f"{lean_emoji} <b>7Hr WICK (London 1AM-8AM)</b>\n"
+    intel = get_brief_intel(p) or {}
+
+    # ---------- TELEGRAM ----------
+    tg  = f"🗓️ <b>SPY MORNING BRIEF</b> · {stamp}\n"
+    tg += "━━━━━━━━━━━━━━━\n"
+    tg += f"📍 Price: <b>${price}</b>"
+    if vix:
+        tg += f"   VIX {vix}{(' · ' + vix_reg) if vix_reg else ''}"
+    tg += "\n\n"
+
+    on = intel.get("overnight") or []
+    if on:
+        tg += "🌍 <b>OVERNIGHT</b>\n" + "\n".join(f"• {x}" for x in on[:5]) + "\n\n"
+
+    cal = intel.get("calendar") or []
+    tg += "📅 <b>CALENDAR (ET)</b>\n"
+    if cal:
+        for ev in cal[:8]:
+            line = f"{_tier_dot(ev.get('tier',''))} <b>{ev.get('time','?')}</b> {ev.get('event','?')}"
+            ep = " / ".join(x for x in (
+                f"exp {ev['exp']}"   if ev.get("exp")   else "",
+                f"prior {ev['prior']}" if ev.get("prior") else "") if x)
+            if ep:
+                line += f"  <i>({ep})</i>"
+            tg += line + "\n"
+    else:
+        tg += f"{intel.get('calendar_note') or 'calendar unavailable — check ForexFactory'}\n"
+    nt = intel.get("no_trade") or []
+    if nt:
+        tg += "⛔ No-trade: " + " · ".join(nt[:4]) + "\n"
+    tg += "\n"
+
+    earn = intel.get("earnings") or []
+    if earn:
+        tg += "💼 <b>EARNINGS</b>\n" + "\n".join(f"• {x}" for x in earn[:4]) + "\n\n"
+
+    tg += (
+        f"{lean_emoji} <b>7Hr WICK (London 1AM–8AM)</b>\n"
         f"Lean: <b>{c7_lean}</b>\n"
-        f"Range: ${c7_low} – ${c7_high}\n\n"
+        f"{range_line}\n\n"
         f"📊 <b>CDV STACK</b>\n"
         f"4H {light(cdv_4h)}  1H {light(cdv_1h)}  15m {light(cdv_15m)}\n"
         f"➤ {align}\n\n"
         f"🗺️ <b>KEY LEVELS</b>\n"
-        f"Battlefield (999): ${ma999}\n"
+        f"Battlefield (999): ${ma999} · regime {regime}\n"
         f"200 SMA: ${ma200}\n"
-        f"London H/L: ${ldnH} / ${ldnL}\n\n"
-        f"🎯 <b>VERDICT</b>\n"
-        f"{verdict}\n"
+        f"London H/L: ${ldnH} / ${ldnL}\n"
     )
+    if yPOC:
+        tg += f"yPOC ${yPOC}"
+        if yVAH and yVAL:
+            tg += f" · yVA ${yVAL}–${yVAH}"
+        tg += "\n"
+    if bias:
+        tg += f"AMD bias: {bias}\n"
     if fakeout and fakeout != "none":
-        tg += f"\n⚠️ <b>FAKE-OUT:</b> {fakeout}\n"
+        tg += f"⚠️ <b>FAKE-OUT:</b> {fakeout}\n"
+    tg += "\n"
 
-    # API-written narrative read (once a day — this is where a synthesis earns its cost)
-    narrative = get_brief_narrative(p)
-    if narrative:
-        tg += f"\n🧠 <b>READ</b>\n{narrative}\n"
+    plan = intel.get("plan") or []
+    tg += "🎯 <b>PLAN</b>\n"
+    if plan:
+        tg += "\n".join(f"• {x}" for x in plan[:4]) + "\n"
+    else:
+        tg += f"{verdict}\n"
+    tg += "\n"
 
-    tg += (
-        f"━━━━━━━━━━━━━━━\n"
-        f"<i>8AM lean has a shelf life — watch the live CDV stack as the day develops.</i>"
-    )
+    read = intel.get("read") or ""
+    if not read:
+        stack = "aligned long" if greens == 3 else "aligned short" if reds == 3 else "mixed — wait for alignment"
+        read = f"{c7_lean} lean into a {regime} regime, CDV {stack}. {verdict}"
+    tg += f"🧠 <b>READ</b>\n{read}\n"
+    tg += "━━━━━━━━━━━━━━━\n"
+    tg += "<i>Pre-market lean has a shelf life — the live CDV stack and the 8:30 print override it.</i>"
 
+    # ---------- INSTAGRAM (second message) ----------
+    top_ev = next((e for e in cal if str(e.get("tier","")).upper() == "RED"), cal[0] if cal else None)
     ig = (
-        f"———————————————\n"
-        f"📋 <b>INSTAGRAM CAPTION (copy below)</b>\n"
+        f"📋 <b>INSTAGRAM CAPTION</b>\n"
         f"———————————————\n\n"
-        f"🗓️ SPY SESSION BRIEF\n"
+        f"🗓️ SPY PRE-MARKET · {now.strftime('%b %-d')}\n"
         f"📍 ${price}\n\n"
+    )
+    if top_ev:
+        ig += f"Watch: {top_ev.get('time','')} {top_ev.get('event','')}\n"
+    ig += (
         f"7Hr Lean: {c7_lean}\n"
         f"CDV: {align}\n\n"
         f"Battlefield ${ma999} | 200 ${ma200}\n"
-        f"Range ${ldnL}–${ldnH}\n\n"
-        f"Plan: {verdict}\n\n"
-        f"#SPY #SP500 #OptionsTrading #LogicalMe #DayTrading #0DTE"
+        f"London ${ldnL}–${ldnH}\n\n"
     )
+    if plan:
+        ig += f"Plan: {plan[0]}\n\n"
+    else:
+        ig += f"Plan: {verdict}\n\n"
+    ig += "#SPY #SP500 #OptionsTrading #LogicalMe #DayTrading #0DTE"
 
-    return tg + "\n\n" + ig
+    return tg, ig
 
 
-def get_brief_narrative(p) -> str:
-    """ONE narrative paragraph for the 8AM brief. Uses the API.
-    Falls back to a deterministic line if the call fails — a billing
-    problem can never kill the post."""
-    c7_lean = str(p.get("7hr_lean", "neutral")).upper()
-    regime  = str(p.get("regime", "")).upper()
-    cdv_4h  = str(p.get("cdv_4h", "")).upper()
-    cdv_1h  = str(p.get("cdv_1h", "")).upper()
-    cdv_15m = str(p.get("cdv_15m", "")).upper()
-    verdict = p.get("verdict", "")
-    fakeout = p.get("fakeout", "none")
-
-    prompt = f"""You are Logical Me, an intraday SPY options system (Oliver Velez Pristine + CDV + 999 EMA + AMD bias).
-It is 8AM ET. Write ONE tight paragraph (max 45 words) framing the day for the trader.
-
-London 7Hr wick lean: {c7_lean}
-Regime (vs 999 EMA): {regime}
-CDV stack 4H/1H/15m: {cdv_4h}/{cdv_1h}/{cdv_15m}
-Fake-Out flag: {fakeout}
-Pine verdict: {verdict}
-
-Be specific and directional. No hype, no emojis, no disclaimers. Just the read."""
-
+def post_morning_brief(p):
+    """Send the brief as two Telegram messages (brief, then caption)."""
+    tg, ig = build_morning_brief(p)
+    send_telegram(tg[:4000])
     try:
-        client = _get_anthropic()
-        resp = client.messages.create(
-            model=ANTHROPIC_MODEL, max_tokens=120,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
+        send_telegram(ig[:4000])
     except Exception as e:
-        notify_error_once(f"AM brief narrative fell back to template: {str(e)}")
-        greens = [cdv_4h, cdv_1h, cdv_15m].count("GREEN")
-        reds   = [cdv_4h, cdv_1h, cdv_15m].count("RED")
-        stack = "aligned long" if greens == 3 else "aligned short" if reds == 3 else "mixed — wait for alignment"
-        return f"{c7_lean} lean into a {regime} regime, CDV {stack}. {verdict}"
+        notify_error_once(f"IG caption post failed: {str(e)[:120]}")
 
 
 def get_recap_narrative(data) -> str:
@@ -660,8 +849,7 @@ def receive_alert():
         if signal_type == "MORNING_BRIEF":
             global LAST_MORNING_BRIEF
             LAST_MORNING_BRIEF = dict(parsed)
-            message = build_morning_brief(parsed)
-            send_telegram(message)
+            post_morning_brief(parsed)
             return jsonify({"status": "ok", "signal": "MORNING_BRIEF"}), 200
 
         config = SIGNAL_CONFIG.get(signal_type)
@@ -730,7 +918,7 @@ def home():
     return jsonify({
         "status":            "Logical Me v18.3 Signal Server",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
-        "api":               "hybrid — intraday alerts template-only (no credits); AM brief + EOD recap use API (2 calls/day)",
+        "api":               "hybrid — intraday alerts template-only (no credits); AM brief (1 call w/ web_fetch calendar + earnings + web_search overnight) + EOD recap (1 call)",
         "version":           "v18.3",
         "extra_endpoints":   ["/recap (POST trades)", "/run-brief (manual AM brief)", "MORNING_BRIEF (auto)"],
     }), 200
@@ -917,7 +1105,7 @@ def run_morning_brief_job():
     If none stashed yet, sends a short heads-up instead of crashing."""
     try:
         if LAST_MORNING_BRIEF:
-            send_telegram(build_morning_brief(LAST_MORNING_BRIEF))
+            post_morning_brief(LAST_MORNING_BRIEF)
         else:
             send_telegram("🗓️ Morning brief scheduled, but no MORNING_BRIEF payload received yet today.")
     except Exception as e:
