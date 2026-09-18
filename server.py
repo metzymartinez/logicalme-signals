@@ -502,14 +502,17 @@ def notify_error_once(err_text: str):
 
 
 # ============================================================
-# === 8AM MORNING BRIEF — macro + calendar + levels (v19)
+# === 8AM MORNING BRIEF — macro + calendar + levels (v20)
 # ============================================================
-# ONE Anthropic call per morning. The API's server-side web_fetch /
-# web_search tools pull the economic calendar (ForexFactory), the
-# earnings calendar (Earnings Whispers) and overnight headlines INSIDE
-# that single request, then return strict JSON. Chart levels always
-# come from the Pine payload, never from the web. If the call fails
-# for any reason the brief still posts from a deterministic template.
+# ONE Anthropic call per morning. Calendar + earnings now come from FMP
+# (fetch_econ_calendar / fetch_earnings_calendar below) via plain requests
+# calls — free, zero tokens, no web_fetch. The API's only job left is one
+# web_search for the overnight tape/headline plus writing the JSON. Chart
+# levels always come from the Pine payload, never from the web. If the
+# call fails for any reason the brief still posts from a deterministic
+# template. (Previously used web_fetch on forexfactory.com and
+# beta.earningswhispers.com — dropped Sep 2026, that was ~80% of the
+# per-call token cost.)
 
 from datetime import datetime
 try:
@@ -518,38 +521,97 @@ try:
 except Exception:
     _ET = None
 
-BRIEF_CALENDAR_URL = "https://www.forexfactory.com/calendar?day=today"
-BRIEF_EARNINGS_URL = "https://beta.earningswhispers.com/"
-
 # Index-moving names: only these (and top-30 S&P weights) get an earnings line.
 BRIEF_MEGACAPS = ("AAPL MSFT NVDA AMZN GOOGL GOOG META AVGO TSLA BRK.B JPM LLY V UNH XOM "
                   "MA COST HD PG JNJ NFLX WMT ABBV BAC CRM ORCL CVX KO AMD MRK PEP ADBE CSCO")
+BRIEF_MEGACAP_SET = set(BRIEF_MEGACAPS.split())
+
+# If a known event (e.g. NFP, always 8:30 ET) lands at the wrong ET time
+# in the output, FMP's calendar timestamp isn't landing as UTC for your
+# account tier — adjust this and redeploy. 0 = trust the UTC conversion below.
+FMP_CALENDAR_TZ_OFFSET_HOURS = 0
 
 BRIEF_TOOLS = [
     {
-        "type": "web_fetch_20260318",
-        "name": "web_fetch",
-        "max_uses": 4,
-        "use_cache": False,
-        "max_content_tokens": 20000,
-        "allowed_domains": ["forexfactory.com", "www.forexfactory.com",
-                            "earningswhispers.com", "beta.earningswhispers.com",
-                            "www.earningswhispers.com"],
-    },
-    {
         "type": "web_search_20250305",
         "name": "web_search",
-        "max_uses": 2,
+        "max_uses": 1,
     },
 ]
+
+
+def _fmp_get(path: str, params: dict):
+    api_key = os.environ.get("FMP_API_KEY")
+    if not api_key:
+        return None
+    try:
+        q = dict(params)
+        q["apikey"] = api_key
+        resp = requests.get(f"https://financialmodelingprep.com/stable/{path}", params=q, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+
+def fetch_econ_calendar(now) -> list:
+    """Today's US medium/high-impact events, from FMP. Replaces the old
+    web_fetch of forexfactory.com — zero Anthropic tokens."""
+    d = now.strftime("%Y-%m-%d")
+    rows = _fmp_get("economic-calendar", {"from": d, "to": d}) or []
+    out = []
+    for r in rows:
+        if str(r.get("country", "")).upper() not in ("US", "USD"):
+            continue
+        if str(r.get("impact", "")).lower() not in ("medium", "high"):
+            continue
+        t_str = ""
+        try:
+            ts = datetime.strptime(str(r.get("date", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            if _ET:
+                ts = ts.replace(tzinfo=ZoneInfo("UTC")).astimezone(_ET)
+                if FMP_CALENDAR_TZ_OFFSET_HOURS:
+                    from datetime import timedelta
+                    ts = ts + timedelta(hours=FMP_CALENDAR_TZ_OFFSET_HOURS)
+            t_str = ts.strftime("%-I:%M %p")
+        except Exception:
+            pass
+        out.append({
+            "time": t_str,
+            "event": r.get("event", ""),
+            "estimate": r.get("estimate"),
+            "previous": r.get("previous"),
+            "impact": str(r.get("impact", "")).upper(),
+        })
+    return out
+
+
+def fetch_earnings_calendar(now) -> list:
+    """Today's megacap earnings, from FMP. Replaces the old web_fetch of
+    beta.earningswhispers.com — zero Anthropic tokens."""
+    d = now.strftime("%Y-%m-%d")
+    rows = _fmp_get("earnings-calendar", {"from": d, "to": d}) or []
+    out = []
+    for r in rows:
+        sym = str(r.get("symbol", "")).upper()
+        if sym not in BRIEF_MEGACAP_SET:
+            continue
+        out.append({
+            "symbol": sym,
+            "session": r.get("time") or "",
+            "eps_est": r.get("epsEstimated"),
+            "rev_est": r.get("revenueEstimated"),
+        })
+    return out
 
 BRIEF_SYSTEM = """You are Logical Me, an intraday SPY 0DTE options system (Oliver Velez Pristine + CDV + 999 EMA battlefield + ICT AMD bias + Volume Profile).
 You write the 8AM ET pre-market brief. You are terse, specific, directional. No hype, no emojis, no disclaimers, no markdown.
 
 RULES
-- All times in ET, 12-hour, no leading zero (8:30, 10:00, 2:00). Convert from the source's timezone if needed; if the source timezone is unclear, use standard US release times (NFP/CPI/PPI/Retail Sales/PCE 8:30, ISM/JOLTS/UMich 10:00, Treasury auctions 1:00, FOMC decision 2:00, minutes 2:00).
-- Economic calendar: US events only, high or medium impact. Include consensus and prior when shown. Tier: RED = NFP, CPI, PPI, PCE, FOMC decision/minutes, GDP advance, Powell speech. YELLOW = ISM, retail sales, JOLTS, claims on a quiet day, UMich, Treasury auctions 10Y/30Y, other Fed speakers. Drop everything else.
-- Earnings: only names in the MEGACAP list or top-30 S&P weights, before-open today or after-close yesterday/today. If none, say so in one line. Note when last night's reports are already priced into ES.
+- The US economic calendar and megacap earnings for today are supplied below as structured data, already filtered and in ET — use them as-is, don't second-guess or re-derive the times. If a known event's time looks wrong (e.g. NFP not at 8:30), keep the supplied time anyway and note it in calendar_note.
+- Economic calendar: from the supplied list only. Tier: RED = NFP, CPI, PPI, PCE, FOMC decision/minutes, GDP advance, Powell speech. YELLOW = everything else supplied (ISM, retail sales, JOLTS, UMich, Treasury auctions, other Fed speakers).
+- Earnings: from the supplied list only. If empty, say so in one line. Note when last night's reports are already priced into ES (check via web_search if relevant).
 - Overnight: what moved while the trader slept — ES vs prior close and gap direction, Asia/Europe tone, DXY, 10Y, VIX, crude, one geopolitical/policy headline if it matters to index risk. Max 5 lines, each under 12 words.
 - Plan: if/then lines using the chart levels supplied, in this exact style: "Above 773.25 + 1H CDV flip green -> longs toward 778.84". Give one long trigger, one short trigger, one no-trade condition. Add a no-trade window for every RED event (event time minus 5 to plus 15 minutes) and for the first 5 minutes after the open when a RED print lands pre-market.
 - Read: ONE paragraph, max 45 words, framing the day: macro driver + structure + what confirms direction.
@@ -605,16 +667,23 @@ def _html_safe(obj):
 
 
 def get_brief_intel(p) -> dict | None:
-    """ONE API call. Returns the parsed JSON dict, or None on any failure."""
+    """ONE API call. Calendar + earnings are pre-fetched from FMP (no tokens);
+    the model only web_searches the overnight tape and writes the JSON.
+    Returns the parsed JSON dict, or None on any failure."""
     now = _now_et()
+    econ = fetch_econ_calendar(now)
+    earn = fetch_earnings_calendar(now)
+
     user = f"""Today is {now.strftime('%A, %B %d, %Y')}, it is {now.strftime('%-I:%M %p')} ET.
 
-STEP 1 - fetch the US economic calendar: {BRIEF_CALENDAR_URL}
-STEP 2 - fetch the earnings calendar: {BRIEF_EARNINGS_URL}
-STEP 3 - web_search once for "stock market futures today" for the overnight tape (ES, DXY, 10Y, VIX, crude, headline).
-STEP 4 - build the brief JSON.
+STEP 1 - web_search once for "stock market futures today" for the overnight tape (ES, DXY, 10Y, VIX, crude, headline).
+STEP 2 - build the brief JSON from the data below. Calendar and earnings are already pulled — don't fetch them again.
 
-MEGACAP list: {BRIEF_MEGACAPS}
+US economic calendar today (medium/high impact, ET times, from FMP):
+{json.dumps(econ, indent=1)}
+
+Megacap earnings today (from FMP):
+{json.dumps(earn, indent=1)}
 
 Chart data from the Pine payload (authoritative for every level; do not replace with web numbers):
 {json.dumps(_brief_levels_json(p), indent=1)}"""
@@ -623,7 +692,7 @@ Chart data from the Pine payload (authoritative for every level; do not replace 
         client = _get_anthropic()
         resp = client.messages.create(
             model=ANTHROPIC_MODEL,
-            max_tokens=1800,
+            max_tokens=1200,
             system=BRIEF_SYSTEM,
             messages=[{"role": "user", "content": user}],
             tools=BRIEF_TOOLS,
