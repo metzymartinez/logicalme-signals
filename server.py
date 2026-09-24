@@ -24,7 +24,9 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # ============================================================
-# === SIGNAL CONFIG — matches v18.3 alert() names exactly
+# === SIGNAL CONFIG — matches Pine alert() names exactly (v18.4 adds v15 signals)
+# kind: "entry" (default) = full trade card | "heads_up" = trend notice, no strike
+#       "exit" = close-only card | "exit_reverse" = close + full entry card
 # ============================================================
 SIGNAL_CONFIG = {
     "STAR_LONG": {
@@ -139,6 +141,71 @@ SIGNAL_CONFIG = {
         "label": "CANDLE BEAR",
         "conviction": "Shooting star / bear engulf / doji at resistance",
     },
+    # ---------------- v18.4 / Pine v15.0 ----------------
+    "FAN_BULL": {
+        "kind": "heads_up",
+        "direction": "LONG",
+        "emoji": "📐",
+        "option": "CALL",
+        "label": "PRISTINE FAN BULL",
+        "conviction": "20 SMA over 200, gap widening, 20 curling up — trend forming. Wait for the B pullback to the 20.",
+    },
+    "FAN_BEAR": {
+        "kind": "heads_up",
+        "direction": "SHORT",
+        "emoji": "📐",
+        "option": "PUT",
+        "label": "PRISTINE FAN BEAR",
+        "conviction": "20 SMA under 200, gap widening, 20 curling down — trend forming. Wait for the S rally to the 20.",
+    },
+    "REJECT_PUT": {
+        "direction": "SHORT",
+        "emoji": "🧱",
+        "option": "PUT",
+        "label": "REJECTION PUT",
+        "conviction": "Rejection candle at key resistance + structure collapse",
+    },
+    "TRAP_CALL": {
+        "direction": "LONG",
+        "emoji": "🪤",
+        "option": "CALL",
+        "label": "TRAP ENTRY CALL",
+        "conviction": "Swept under 999, reclaimed with a higher low — 4H CDV positive",
+    },
+    "CLOSE_PUT_EXIT": {
+        "kind": "exit",
+        "direction": "LONG",
+        "emoji": "🚪",
+        "option": "PUT",
+        "label": "CLOSE PUT — EXIT ONLY",
+        "conviction": "CHoCH flipped BULL but 4H CDV still negative (or calls vetoed) — take the exit, don't flip long",
+    },
+    "CLOSE_CALL_EXIT": {
+        "kind": "exit",
+        "direction": "SHORT",
+        "emoji": "🚪",
+        "option": "CALL",
+        "label": "CLOSE CALL — EXIT ONLY",
+        "conviction": "CHoCH flipped BEAR but 4H CDV still positive (or puts vetoed) — take the exit, don't flip short",
+    },
+    "CLOSE_PUT_CALL_ENTRY": {
+        "kind": "exit_reverse",
+        "direction": "LONG",
+        "emoji": "🔄",
+        "option": "CALL",
+        "close": "PUT",
+        "label": "CLOSE PUT → CALL ENTRY",
+        "conviction": "CHoCH flipped BULL + 4H CDV positive — reversal confirmed",
+    },
+    "CLOSE_CALL_PUT_ENTRY": {
+        "kind": "exit_reverse",
+        "direction": "SHORT",
+        "emoji": "🔄",
+        "option": "PUT",
+        "close": "CALL",
+        "label": "CLOSE CALL → PUT ENTRY",
+        "conviction": "CHoCH flipped BEAR + 4H CDV negative — reversal confirmed",
+    },
 }
 
 
@@ -211,6 +278,7 @@ def parse_tradingview_message(raw_body: str) -> dict:
                 "7hr_lean":      str(data.get("7hr_lean", "")),
                 "fakeout":       str(data.get("fakeout", "none")),
                 "verdict":       str(data.get("verdict", "")),
+                "fan":           str(data.get("fan", "")),
                 "raw":           raw_body,
             }
     except (json.JSONDecodeError, ValueError):
@@ -357,6 +425,15 @@ def get_tape_read(parsed: dict, config: dict) -> str:
     elif node_state == "MID":
         bits.append(f"MID node ({node_den}) — no clear shelf")
 
+    # 2b. Pristine fan (v18.4)
+    fan = str(parsed.get("fan", "")).upper()
+    if fan == "BULL":
+        bits.append("pristine BULL fan")
+    elif fan == "BEAR":
+        bits.append("pristine BEAR fan")
+    elif fan == "COMPRESS":
+        bits.append("MAs compressing — no fan")
+
     # 3. 999 battlefield position
     if ma999:
         if price > ma999:
@@ -469,6 +546,45 @@ def build_telegram_message(parsed: dict, config: dict) -> str:
         f"<i>Not financial advice</i>"
     )
 
+    return msg
+
+
+def _cdv_line(parsed: dict) -> str:
+    return (f"{cdv_emoji(parsed.get('cdv_4h',''))}4H {cdv_emoji(parsed.get('cdv_1h',''))}1H "
+            f"{cdv_emoji(parsed.get('cdv_15m',''))}15m {cdv_emoji(parsed.get('cdv_2m',''))}2m")
+
+
+def build_exit_message(parsed: dict, config: dict) -> str:
+    """CHoCH exit — close the open position, no new entry."""
+    flip = "BULL" if config["direction"] == "LONG" else "BEAR"
+    return (
+        f"{config['emoji']} <b>{config['label']}</b> — {parsed.get('ticker','SPY')} @ <b>${parsed.get('price','?')}</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🕐 {parsed.get('time','?')} | CHoCH flipped {flip}\n"
+        f"{_cdv_line(parsed)}\n"
+        f"\n➤ Close any open <b>{config['option']}</b> now.\n"
+        f"<i>{config['conviction']}</i>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"<i>Not financial advice</i>"
+    )
+
+
+def build_heads_up_message(parsed: dict, config: dict) -> str:
+    """Trend-state notice (Pristine fan) — no strike, no stop."""
+    ma20  = parsed.get("ma20", "?")
+    ma200 = parsed.get("ma200", "?")
+    veto  = str(parsed.get("veto", "NONE")).upper()
+    msg = (
+        f"{config['emoji']} <b>{config['label']}</b> — {parsed.get('ticker','SPY')} @ <b>${parsed.get('price','?')}</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🕐 {parsed.get('time','?')}\n"
+        f"{_cdv_line(parsed)}\n"
+        f"20 SMA ${ma20} | 200 SMA ${ma200}\n"
+        f"\n➤ <i>{config['conviction']}</i>\n"
+    )
+    if veto and veto != "NONE":
+        msg += f"🚫 Veto active: {veto}\n"
+    msg += "━━━━━━━━━━━━━━━\n<i>Heads-up only — not an entry</i>"
     return msg
 
 
@@ -941,7 +1057,15 @@ def receive_alert():
             send_telegram(msg)
             return jsonify({"status": "unknown signal", "signal": signal_type}), 200
 
-        message = build_telegram_message(parsed, config)
+        kind = config.get("kind", "entry")
+        if kind == "exit":
+            message = build_exit_message(parsed, config)
+        elif kind == "heads_up":
+            message = build_heads_up_message(parsed, config)
+        else:
+            message = build_telegram_message(parsed, config)
+            if kind == "exit_reverse":
+                message = f"🚪 <b>CLOSE your {config.get('close','position')} first.</b>\n" + message
         send_telegram(message)
         return jsonify({"status": "ok", "signal": signal_type}), 200
 
@@ -994,10 +1118,10 @@ def test():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "status":            "Logical Me v18.3 Signal Server",
+        "status":            "Logical Me v18.4 Signal Server",
         "signals_supported": list(SIGNAL_CONFIG.keys()),
         "api":               "hybrid — intraday alerts template-only (no credits); AM brief (1 call w/ web_fetch calendar + earnings + web_search overnight) + EOD recap (1 call)",
-        "version":           "v18.3",
+        "version":           "v18.4",
         "extra_endpoints":   ["/recap (POST trades)", "/run-brief (manual AM brief)", "MORNING_BRIEF (auto)"],
     }), 200
 
