@@ -206,6 +206,42 @@ SIGNAL_CONFIG = {
         "label": "CLOSE CALL → PUT ENTRY",
         "conviction": "CHoCH flipped BEAR + 4H CDV negative — reversal confirmed",
     },
+    # ---------------- v18.5 / LOD Hunter ----------------
+    "LOD_CALL": {
+        "kind": "hunter",
+        "direction": "LONG",
+        "emoji": "🎯",
+        "option": "CALL",
+        "label": "LOD CALL",
+    },
+    "HOD_PUT": {
+        "kind": "hunter",
+        "direction": "SHORT",
+        "emoji": "🎯",
+        "option": "PUT",
+        "label": "HOD PUT",
+    },
+    "PB_CALL": {
+        "kind": "hunter",
+        "direction": "LONG",
+        "emoji": "🌀",
+        "option": "CALL",
+        "label": "PB CALL",
+    },
+    "HUNT_TARGET": {
+        "kind": "hunter_exit",
+        "direction": "",
+        "emoji": "✅",
+        "option": "",
+        "label": "TARGET HIT",
+    },
+    "HUNT_STOPPED": {
+        "kind": "hunter_exit",
+        "direction": "",
+        "emoji": "❌",
+        "option": "",
+        "label": "STOPPED",
+    },
 }
 
 
@@ -279,6 +315,11 @@ def parse_tradingview_message(raw_body: str) -> dict:
                 "fakeout":       str(data.get("fakeout", "none")),
                 "verdict":       str(data.get("verdict", "")),
                 "fan":           str(data.get("fan", "")),
+                # --- v18.5 LOD Hunter ---
+                "stop":          str(data.get("stop", "")),
+                "target":        str(data.get("target", "")),
+                "attempt":       str(data.get("attempt", "")),
+                "side":          str(data.get("side", "")),
                 "raw":           raw_body,
             }
     except (json.JSONDecodeError, ValueError):
@@ -586,6 +627,43 @@ def build_heads_up_message(parsed: dict, config: dict) -> str:
         msg += f"🚫 Veto active: {veto}\n"
     msg += "━━━━━━━━━━━━━━━\n<i>Heads-up only — not an entry</i>"
     return msg
+
+
+def build_hunter_message(parsed: dict, config: dict) -> str:
+    """LOD Hunter entry — trade card only; no rule text."""
+    price   = parsed.get("price", "?")
+    stop    = parsed.get("stop", "?")
+    target  = parsed.get("target", "?")
+    attempt = parsed.get("attempt", "")
+    strike  = suggest_strike(parsed, config["direction"])
+    ma999   = parsed.get("ma999", "")
+    att_txt = f" #{attempt}" if attempt and config["label"] != "PB CALL" else ""
+    msg = (
+        f"{config['emoji']} <b>{config['label']}{att_txt}</b> — {parsed.get('ticker','SPY')} @ <b>${price}</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🕐 {parsed.get('time','?')}\n"
+        f"🛑 Stop: ${stop}\n"
+        f"🎯 Target: ${target}\n"
+    )
+    if ma999:
+        msg += f"〰️ 999 EMA: ${ma999}\n"
+    msg += (
+        f"\n🎰 {strike} 0DTE {config['option']}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"<i>Not financial advice</i>"
+    )
+    return msg
+
+
+def build_hunter_exit_message(parsed: dict, config: dict) -> str:
+    """LOD Hunter exit — target hit or stopped."""
+    side = parsed.get("side", "")
+    att  = parsed.get("attempt", "")
+    what = f"{side} #{att}" if side and att else (side or "position")
+    return (
+        f"{config['emoji']} <b>{config['label']}</b> — {what} @ <b>${parsed.get('price','?')}</b>\n"
+        f"🕐 {parsed.get('time','?')}"
+    )
 
 
 # ============================================================
@@ -1058,6 +1136,12 @@ def receive_alert():
             return jsonify({"status": "unknown signal", "signal": signal_type}), 200
 
         kind = config.get("kind", "entry")
+        if kind == "hunter":
+            send_telegram(build_hunter_message(parsed, config))
+            return jsonify({"status": "ok", "signal": signal_type}), 200
+        if kind == "hunter_exit":
+            send_telegram(build_hunter_exit_message(parsed, config))
+            return jsonify({"status": "ok", "signal": signal_type}), 200
         if kind == "exit":
             message = build_exit_message(parsed, config)
         elif kind == "heads_up":
