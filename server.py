@@ -244,6 +244,10 @@ SIGNAL_CONFIG = {
     },
 }
 
+# Reminder alerts from LOD Hunter v4.1 (zero API calls — see recap_reminders.py).
+# HOD_PUT / LOD_CALL are NOT here: they stay your normal trade cards above.
+from recap_reminders import build_reminders, format_reminders
+REMINDER_SIGNALS = ("PREMARKET", "CHECK10", "TREND_MODE", "RECAP")
 
 # ============================================================
 # === PARSER — reads full v18.3 JSON payload (adds VP + NODE)
@@ -1123,6 +1127,15 @@ def receive_alert():
             LAST_MORNING_BRIEF = dict(parsed)
             _stash_save(parsed)
             return jsonify({"status": "ok", "signal": "MORNING_BRIEF", "stashed": True}), 200
+
+        # === REMINDERS — PREMARKET / CHECK10 / TREND_MODE / RECAP (no API call) ===
+        if signal_type in REMINDER_SIGNALS:
+            import html as _html
+            payload = json.loads(raw_body)          # full Pine JSON; the parser above drops these fields
+            payload["signal"] = signal_type
+            text = format_reminders(payload, build_reminders(payload))
+            send_telegram(_html.escape(text, quote=False))
+            return jsonify({"status": "ok", "signal": signal_type}), 200
 
         config = SIGNAL_CONFIG.get(signal_type)
 
