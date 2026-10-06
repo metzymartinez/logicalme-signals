@@ -178,7 +178,10 @@ def build_reminders(p: dict) -> list[str]:
                 L.append(f"Down-drive ({DOWN_DRIVE_DAYS} days): no edge measured from 10:00 to noon in either direction. "
                          f"The up-drive ride result does NOT mirror.")
     elif sig == "CHECK10" and o is not None:
-        L.append(f"No open-drive: opened {o:.2f} against yesterday's range {pdl:.2f}-{pdh:.2f}.")
+        if pdl is not None and pdh is not None:
+            L.append(f"No open-drive: opened {o:.2f} against yesterday's range {pdl:.2f}-{pdh:.2f}.")
+        else:
+            L.append(f"No open-drive: opened {o:.2f} (yesterday's range not in payload).")
 
     # 2. Gap fill (both directions)
     if o and pdc:
