@@ -767,6 +767,9 @@ def fetch_econ_calendar(now) -> list:
         t_str = ""
         try:
             ts = datetime.strptime(str(r.get("date", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            # FMP gives speeches/untimed events a midnight stamp — treat as no time.
+            if ts.hour == 0 and ts.minute == 0:
+                raise ValueError("untimed event")
             if _ET:
                 ts = ts.replace(tzinfo=ZoneInfo("UTC")).astimezone(_ET)
                 if FMP_CALENDAR_TZ_OFFSET_HOURS:
@@ -775,13 +778,18 @@ def fetch_econ_calendar(now) -> list:
             t_str = ts.strftime("%-I:%M %p")
         except Exception:
             pass
-        out.append({
-            "time": t_str,
+        row = {
+            "time": t_str or "untimed",
             "event": r.get("event", ""),
-            "estimate": r.get("estimate"),
-            "previous": r.get("previous"),
             "impact": str(r.get("impact", "")).upper(),
-        })
+        }
+        # Only ship exp/prior when FMP actually has them — a null key is what
+        # makes the model print "exp n/a / prior n/a" on Fed speeches.
+        if r.get("estimate") not in (None, ""):
+            row["estimate"] = r.get("estimate")
+        if r.get("previous") not in (None, ""):
+            row["previous"] = r.get("previous")
+        out.append(row)
     return out
 
 
@@ -810,7 +818,8 @@ RULES
 - The US economic calendar and megacap earnings for today are supplied below as structured data, already filtered and in ET — use them as-is, don't second-guess or re-derive the times. If a known event's time looks wrong (e.g. NFP not at 8:30), keep the supplied time anyway and note it in calendar_note.
 - Economic calendar: from the supplied list only. Tier: RED = NFP, CPI, PPI, PCE, FOMC decision/minutes, GDP advance, Powell speech. YELLOW = everything else supplied (ISM, retail sales, JOLTS, UMich, Treasury auctions, other Fed speakers).
 - Earnings: from the supplied list only. If empty, say so in one line. Note when last night's reports are already priced into ES (check via web_search if relevant).
-- Overnight: what moved while the trader slept — ES vs prior close and gap direction, Asia/Europe tone, DXY, 10Y, VIX, crude, one geopolitical/policy headline if it matters to index risk. Max 5 lines, each under 12 words.
+- Overnight: what moved while the trader slept — ES vs prior close and gap direction, Asia/Europe tone, DXY, 10Y, VIX, crude, one geopolitical/policy headline if it matters to index risk. Max 5 lines, each under 12 words. Only include an instrument whose number you actually found in the search results; if DXY/10Y/crude didn't come back, leave it out entirely — never write "not confirmed", "treat as stable", "n/a" or any placeholder.
+- Calendar rows: copy "exp" and "prior" only when the supplied row has estimate/previous — omit both keys otherwise (never "n/a"). A row with time "untimed" is a speech or untimed release: use the time "TBD" only if the event is a Fed speaker, otherwise drop the row.
 - Plan: if/then lines using the chart levels supplied, in this exact style: "Above 773.25 + 1H CDV flip green -> longs toward 778.84". Give one long trigger, one short trigger, one no-trade condition. Add a no-trade window for every RED event (event time minus 5 to plus 15 minutes) and for the first 5 minutes after the open when a RED print lands pre-market.
 - Read: ONE paragraph, max 45 words, framing the day: macro driver + structure + what confirms direction.
 - Never invent numbers. If a fetch fails, set the section's "note" to what failed and keep the rest.
@@ -961,10 +970,15 @@ def build_morning_brief(p):
         return "🟢" if v == "GREEN" else "🔴"
 
     lean_emoji = "🐂" if c7_lean == "LONG" else "🐻" if c7_lean == "SHORT" else "⏸"
-    if _sane_range(price, c7_low, c7_high):
+    have_7hr = bool(safe_float(c7_low)) and bool(safe_float(c7_high))
+    have_ldn = bool(safe_float(ldnL)) and bool(safe_float(ldnH))
+    if have_7hr and _sane_range(price, c7_low, c7_high):
         range_line = f"Range: ${c7_low} – ${c7_high}"
+    elif have_ldn:
+        why = "7Hr candle not in Pine payload" if not have_7hr else "7Hr range implausible (extended-hours print)"
+        range_line = f"Range: ${ldnL} – ${ldnH} (London H/L — {why})"
     else:
-        range_line = "Range: ⚠️ data suspect (extended-hours print) — using London H/L"
+        range_line = "Range: ⚠️ no 7Hr or London H/L in payload — check MORNING_BRIEF alert JSON"
 
     intel = get_brief_intel(p) or {}
 
