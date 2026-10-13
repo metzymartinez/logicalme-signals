@@ -5,7 +5,7 @@ indicator("LM Cycle Clock", overlay = true, max_labels_count = 500, max_lines_co
 // plus how often legs this size kept going (measured on ~105 days of SPY; 2m and 5m agree within a few points).
 // A leg ends when price reverses by the "reversal" amount from its extreme.
 // Separate from LOD Hunter: it does not change or gate any HOD / LOD signal.
-// v4: live leg box made narrow + glassy (short stacked lines, smaller size); odds re-measured on 320 days and split WITH vs AGAINST the day (price vs 9:30 open). CYCLE alert JSON now also sends "with_day" (recreate the alert).
+// v4: live leg box made narrow + glassy (short stacked lines, smaller size); odds re-measured on 320 days and split WITH vs AGAINST the day (price vs 9:30 open). CYCLE alert JSON now also sends "with_day" (recreate the alert). Finished legs labeled from $1.50, tiny glassy, with/vs day.
 
 thr     = input.float(1.50, "Reversal that ends a leg ($)", minval = 0.25, step = 0.25)
 lvA     = input.float(2.0, "Alert level 1 ($)", minval = 0.5)
@@ -14,7 +14,7 @@ lvC     = input.float(4.0, "Alert level 3 ($)", minval = 0.5)
 lvD     = input.float(5.0, "Alert level 4 ($)", minval = 0.5)
 sendHook = input.bool(true, "Send webhook alerts (JSON)")
 showLegs = input.bool(true, "Draw every finished leg on the chart")
-minLabel = input.float(2.0, "Label finished legs of at least ($)", minval = 0.0, step = 0.5)
+minLabel = input.float(1.5, "Label finished legs of at least ($)", minval = 0.0, step = 0.25)
 sessStr = input.session("0930-1600", "RTH session")
 tz = "America/New_York"
 
@@ -47,23 +47,23 @@ wNext  = array.from(49, 44, 42, 35)
 aNext  = array.from(40, 39, 36, 35)
 
 // Draw a finished leg: line from its start to its extreme, size + minutes at the extreme
-f_draw(sT, sP, eT, eP, isDown) =>
+f_draw(sT, sP, eT, eP, isDown, isWith) =>
     if showLegs and not na(sT) and not na(eT)
         col = isDown ? color.new(#ff1744, 25) : color.new(#00e676, 25)
         line.new(sT, sP, eT, eP, xloc.bar_time, color = col, width = 2, force_overlay = true)
         sz = math.abs(sP - eP)
         if sz >= minLabel
             label.new(eT, eP, "", xloc.bar_time, color = color.new(col, 35), style = label.style_circle, size = size.tiny, force_overlay = true)
-            label.new(eT, eP, (isDown ? "▼ $" : "▲ $") + str.tostring(sz, "#.##") + " · " + str.tostring(math.round((eT - sT) / 60000.0), "#") + "m",
-                 xloc.bar_time, color = color.new(col, 45), textcolor = color.white,
-                 style = isDown ? label.style_label_up : label.style_label_down, size = size.small, force_overlay = true)
+            label.new(eT, eP, (isDown ? "▼ $" : "▲ $") + str.tostring(sz, "#.##") + " · " + str.tostring(math.round((eT - sT) / 60000.0), "#") + "m\n" + (isWith ? "with day" : "vs day"),
+                 xloc.bar_time, color = color.new(col, 55), textcolor = color.white,
+                 style = isDown ? label.style_label_up : label.style_label_down, size = size.tiny, force_overlay = true)
 
 if newDay
     // close out yesterday's last leg so it is drawn too
     if dirn == 1
-        f_draw(legStartT, legStart, hiT, hiP, false)
+        f_draw(legStartT, legStart, hiT, hiP, false, legWith)
     else if dirn == -1
-        f_draw(legStartT, legStart, loT, loP, true)
+        f_draw(legStartT, legStart, loT, loP, true, legWith)
     dirn := 0
     hiP := high
     loP := low
@@ -102,7 +102,7 @@ else if inRTH
             hiP := high
             hiT := time
         if hiP - low >= thr
-            f_draw(legStartT, legStart, hiT, hiP, false)
+            f_draw(legStartT, legStart, hiT, hiP, false, legWith)
             dirn := -1
             legWith := close < dayOpen
             legStart := hiP
@@ -115,7 +115,7 @@ else if inRTH
             loP := low
             loT := time
         if high - loP >= thr
-            f_draw(legStartT, legStart, loT, loP, true)
+            f_draw(legStartT, legStart, loT, loP, true, legWith)
             dirn := 1
             legWith := close > dayOpen
             legStart := loP
