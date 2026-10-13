@@ -126,6 +126,8 @@ else if inRTH
 
 curSize = dirn == -1 ? legStart - loP : dirn == 1 ? hiP - legStart : na
 ageMin  = na(legStartT) ? na : math.round((time - legStartT) / 60000.0)
+// box shows the leg's own length (start → its extreme), not time since start — after hours it kept counting
+legMin  = na(legStartT) ? na : math.round(((dirn == -1 ? loT : hiT) - legStartT) / 60000.0)
 extP    = dirn == -1 ? loP : hiP
 extT    = dirn == -1 ? loT : hiT
 dirTxt  = dirn == -1 ? "DOWN" : "UP"
@@ -152,7 +154,7 @@ if barstate.islast and dirn != 0 and not na(curSize)
          cond + ": past $" + str.tostring(f_lvl(i), "#") + " → " + str.tostring(legWith ? array.get(wNext, i) : array.get(aNext, i)) + "%\ngo $1 more" :
          cond + ": " + str.tostring(legWith ? array.get(wReach, 0) : array.get(aReach, 0)) + "%\nreach $" + str.tostring(lvA, "#")
     base = dirn == -1 ? #ff1744 : #00e676
-    head = (dirn == -1 ? "▼ $" : "▲ $") + str.tostring(curSize, "#.##") + " · " + str.tostring(ageMin, "#") + "m"
+    head = (dirn == -1 ? "▼ $" : "▲ $") + str.tostring(curSize, "#.##") + " · " + str.tostring(legMin, "#") + "m"
     label.delete(lab)
     line.delete(ln)
     label.delete(dot)
