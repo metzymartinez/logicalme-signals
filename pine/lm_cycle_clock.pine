@@ -1,0 +1,164 @@
+//@version=6
+indicator("LM Cycle Clock", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+// Tracks the CURRENT intraday swing (leg) and tells you how big/old it is,
+// plus how often legs this size kept going (measured on ~105 days of SPY; 2m and 5m agree within a few points).
+// A leg ends when price reverses by the "reversal" amount from its extreme.
+// Separate from LOD Hunter: it does not change or gate any HOD / LOD signal.
+// v4: live leg box made narrow + glassy (short stacked lines, smaller size); odds re-measured on 320 days and split WITH vs AGAINST the day (price vs 9:30 open). CYCLE alert JSON now also sends "with_day" (recreate the alert).
+
+thr     = input.float(1.50, "Reversal that ends a leg ($)", minval = 0.25, step = 0.25)
+lvA     = input.float(2.0, "Alert level 1 ($)", minval = 0.5)
+lvB     = input.float(3.0, "Alert level 2 ($)", minval = 0.5)
+lvC     = input.float(4.0, "Alert level 3 ($)", minval = 0.5)
+lvD     = input.float(5.0, "Alert level 4 ($)", minval = 0.5)
+sendHook = input.bool(true, "Send webhook alerts (JSON)")
+showLegs = input.bool(true, "Draw every finished leg on the chart")
+minLabel = input.float(2.0, "Label finished legs of at least ($)", minval = 0.0, step = 0.5)
+sessStr = input.session("0930-1600", "RTH session")
+tz = "America/New_York"
+
+inRTH  = not na(time(timeframe.period, sessStr, tz))
+newDay = inRTH and (not inRTH[1] or dayofmonth(time, tz) != dayofmonth(time[1], tz))
+
+var int   dirn      = 0       // 0 = undecided, 1 = up leg, -1 = down leg
+var float hiP       = na
+var float loP       = na
+var int   hiT       = na
+var int   loT       = na
+var float legStart  = na
+var int   legStartT = na
+var int   fired     = 0
+var label lab       = na
+var line  ln        = na
+var label dot       = na
+var float dayOpen   = na
+var bool  legWith  = false
+
+// v4 data: re-measured Oct 12 2026 on 320 days of SPY 5m (Jul 7 2025 – Oct 12 2026, RTH, $1.50 reversal), 3,342 legs.
+// Split by CONDITION at the moment the leg is confirmed:
+//   WITH the day    = leg points the same way as price vs the 9:30 open (1,776 legs)
+//   AGAINST the day = leg fights the day (1,566 legs)
+// Share of legs that reach $2/$3/$4/$5:
+wReach = array.from(73, 35, 16, 7)
+aReach = array.from(62, 25, 10, 4)
+// ...and, of legs that reached $2/$3/$4/$5, the share that went $1 more
+wNext  = array.from(49, 44, 42, 35)
+aNext  = array.from(40, 39, 36, 35)
+
+// Draw a finished leg: line from its start to its extreme, size + minutes at the extreme
+f_draw(sT, sP, eT, eP, isDown) =>
+    if showLegs and not na(sT) and not na(eT)
+        col = isDown ? color.new(#ff1744, 25) : color.new(#00e676, 25)
+        line.new(sT, sP, eT, eP, xloc.bar_time, color = col, width = 2, force_overlay = true)
+        sz = math.abs(sP - eP)
+        if sz >= minLabel
+            label.new(eT, eP, "", xloc.bar_time, color = color.new(col, 35), style = label.style_circle, size = size.tiny, force_overlay = true)
+            label.new(eT, eP, (isDown ? "▼ $" : "▲ $") + str.tostring(sz, "#.##") + " · " + str.tostring(math.round((eT - sT) / 60000.0), "#") + "m",
+                 xloc.bar_time, color = color.new(col, 45), textcolor = color.white,
+                 style = isDown ? label.style_label_up : label.style_label_down, size = size.small, force_overlay = true)
+
+if newDay
+    // close out yesterday's last leg so it is drawn too
+    if dirn == 1
+        f_draw(legStartT, legStart, hiT, hiP, false)
+    else if dirn == -1
+        f_draw(legStartT, legStart, loT, loP, true)
+    dirn := 0
+    hiP := high
+    loP := low
+    hiT := time
+    loT := time
+    legStart := na
+    legStartT := na
+    fired := 0
+    dayOpen := open
+else if inRTH
+    if dirn == 0
+        if high > hiP
+            hiP := high
+            hiT := time
+        if low < loP
+            loP := low
+            loT := time
+        if hiP - low >= thr
+            dirn := -1
+            legWith := close < dayOpen
+            legStart := hiP
+            legStartT := hiT
+            loP := low
+            loT := time
+            fired := 0
+        else if high - loP >= thr
+            dirn := 1
+            legWith := close > dayOpen
+            legStart := loP
+            legStartT := loT
+            hiP := high
+            hiT := time
+            fired := 0
+    else if dirn == 1
+        if high > hiP
+            hiP := high
+            hiT := time
+        if hiP - low >= thr
+            f_draw(legStartT, legStart, hiT, hiP, false)
+            dirn := -1
+            legWith := close < dayOpen
+            legStart := hiP
+            legStartT := hiT
+            loP := low
+            loT := time
+            fired := 0
+    else
+        if low < loP
+            loP := low
+            loT := time
+        if high - loP >= thr
+            f_draw(legStartT, legStart, loT, loP, true)
+            dirn := 1
+            legWith := close > dayOpen
+            legStart := loP
+            legStartT := loT
+            hiP := high
+            hiT := time
+            fired := 0
+
+curSize = dirn == -1 ? legStart - loP : dirn == 1 ? hiP - legStart : na
+ageMin  = na(legStartT) ? na : math.round((time - legStartT) / 60000.0)
+extP    = dirn == -1 ? loP : hiP
+extT    = dirn == -1 ? loT : hiT
+dirTxt  = dirn == -1 ? "DOWN" : "UP"
+
+f_idx(sz) => sz >= lvD ? 3 : sz >= lvC ? 2 : sz >= lvB ? 1 : sz >= lvA ? 0 : -1
+f_lvl(i) => i == 0 ? lvA : i == 1 ? lvB : i == 2 ? lvC : lvD
+
+// Alert once per leg each time a new level is crossed
+idx = na(curSize) or not inRTH ? -1 : f_idx(curSize)
+if dirn != 0 and inRTH and idx >= 0 and idx + 1 > fired
+    fired := idx + 1
+    if sendHook
+        alert('{"signal":"CYCLE","ticker":"' + syminfo.ticker + '","time":"' + str.format_time(time_close, "HH:mm", tz) +
+             '","dir":"' + dirTxt + '","size":"' + str.tostring(curSize, "#.##") + '","mins":"' + str.tostring(ageMin, "#") +
+             '","level":"' + str.tostring(f_lvl(idx), "#.#") + '","price":"' + str.tostring(close, "#.##") +
+             '","leg_start":"' + str.tostring(legStart, "#.##") + '","with_day":"' + str.tostring(legWith) + '"}', alert.freq_once_per_bar_close)
+
+// Live label + leg line on the latest bar
+if barstate.islast and dirn != 0 and not na(curSize)
+    i = f_idx(curSize)
+    // v4: compact — stacked short lines so the box stays narrow
+    cond = legWith ? "with day" : "vs day"
+    tail = i >= 0 ?
+         cond + ": past $" + str.tostring(f_lvl(i), "#") + " → " + str.tostring(legWith ? array.get(wNext, i) : array.get(aNext, i)) + "%\ngo $1 more" :
+         cond + ": " + str.tostring(legWith ? array.get(wReach, 0) : array.get(aReach, 0)) + "%\nreach $" + str.tostring(lvA, "#")
+    base = dirn == -1 ? #ff1744 : #00e676
+    head = (dirn == -1 ? "▼ $" : "▲ $") + str.tostring(curSize, "#.##") + " · " + str.tostring(ageMin, "#") + "m"
+    label.delete(lab)
+    line.delete(ln)
+    label.delete(dot)
+    // glassy dot on the extreme + the readable reminder right next to it
+    dot := label.new(extT, extP, "", xloc.bar_time, color = color.new(base, 25), style = label.style_circle, size = size.small, force_overlay = true)
+    lab := label.new(extT, extP, head + "\n" + tail, xloc.bar_time, color = color.new(base, 45), textcolor = color.white,
+         style = dirn == -1 ? label.style_label_up : label.style_label_down, size = size.small, force_overlay = true)
+    ln := line.new(legStartT, legStart, extT, extP, xloc.bar_time, color = color.new(base, 30),
+         width = 2, style = line.style_dashed, force_overlay = true)

@@ -1,7 +1,7 @@
 """
 Logical Me — reminders (server.py add-on), v3: two-sided, every number measured.
 
-Handles PREMARKET / CHECK10 / HOD_PUT / LOD_CALL / TREND_MODE / RECAP payloads.
+Handles PREMARKET / CHECK10 / HOD_PUT / LOD_CALL / TREND_MODE / RECAP / CYCLE payloads.
 Zero API calls. Each line is either
   (a) a FACT computed from the payload, or
   (b) a HISTORY line quoting a number measured on your own data, with its n.
@@ -75,6 +75,13 @@ HOD_999_DIST = [
 # yesterday's levels; with 3+ premarket pushes at that extreme: 16 of 20 days. Directional, weak, small n.
 PM = {"days": 44, "touch_pct": 70, "base_pct": 65, "many_n": 20, "many_hit": 16}
 
+# CYCLE (LM Cycle Clock v4). 320 days SPY 5m, Jul 7 2025 - Oct 12 2026, RTH, $1.50 reversal, 3,342 legs.
+# WITH the day = leg points the same way as price vs the 9:30 open when the leg is confirmed.
+# level -> (share of legs that reach it, share of those that went $1 more)
+CYCLE_SAMPLE = "320 days, SPY 5m, Jul 2025-Oct 2026"
+CYCLE_WITH    = {2: (73, 49), 3: (35, 44), 4: (16, 42), 5: (7, 35)}   # 1,776 legs
+CYCLE_AGAINST = {2: (62, 40), 3: (25, 39), 4: (10, 36), 5: (4, 35)}   # 1,566 legs
+
 
 def _f(d, k, default=None):
     try:
@@ -111,6 +118,22 @@ def _dist_row(dist):
 def build_reminders(p: dict) -> list[str]:
     sig = p.get("signal", "")
     L = []
+
+    # ---------- CYCLE (Cycle Clock leg alert at $2/$3/$4/$5) ----------
+    if sig == "CYCLE":
+        size, lvl = _f(p, "size"), _f(p, "level")
+        mins, d = p.get("mins", "?"), str(p.get("dir", "")).upper()
+        wd = str(p.get("with_day", "")).lower()
+        if size is not None:
+            L.append(f"{'▼ DOWN' if d == 'DOWN' else '▲ UP'} leg ${size:.2f} in {mins}m, from {p.get('leg_start', '?')}.")
+        if lvl is not None and wd in ("true", "false"):
+            tbl = CYCLE_WITH if wd == "true" else CYCLE_AGAINST
+            row = tbl.get(int(lvl))
+            if row:
+                L.append(f"{'With' if wd == 'true' else 'Against'} the day: of legs past ${int(lvl)}, {row[1]}% went $1 more ({CYCLE_SAMPLE}).")
+        elif lvl is not None:
+            L.append("Leg odds need with_day in the alert — update LM Cycle Clock to v4.")
+        return L
 
     # ---------- PREMARKET (09:28) ----------
     if sig == "PREMARKET":
@@ -234,7 +257,8 @@ def build_reminders(p: dict) -> list[str]:
 def format_reminders(p: dict, lines: list[str]) -> str:
     sig = p.get("signal", "")
     head = {"PREMARKET": "🌅 PREMARKET", "CHECK10": "⏱ 10:00 CHECK-IN", "HOD_PUT": "🔻 HOD PUT",
-            "LOD_CALL": "🔺 LOD CALL", "RECAP": "📓 RECAP", "TREND_MODE": "🚩 TREND MODE"}.get(sig, sig)
+            "LOD_CALL": "🔺 LOD CALL", "RECAP": "📓 RECAP", "TREND_MODE": "🚩 TREND MODE",
+            "CYCLE": "🔄 CYCLE"}.get(sig, sig)
     body = "\n".join(f"• {x}" for x in lines) if lines else "• Nothing notable."
     return f"{head} — {p.get('ticker', 'SPY')} {p.get('time', '')}\nYou've seen this before:\n{body}"
 

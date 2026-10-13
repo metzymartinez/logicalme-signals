@@ -247,7 +247,7 @@ SIGNAL_CONFIG = {
 # Reminder alerts from LOD Hunter v4.1 (zero API calls — see recap_reminders.py).
 # HOD_PUT / LOD_CALL are NOT here: they stay your normal trade cards above.
 from recap_reminders import build_reminders, format_reminders
-REMINDER_SIGNALS = ("PREMARKET", "CHECK10", "TREND_MODE", "RECAP")
+REMINDER_SIGNALS = ("PREMARKET", "CHECK10", "TREND_MODE", "RECAP", "CYCLE")
 
 # ============================================================
 # === PARSER — reads full v18.3 JSON payload (adds VP + NODE)
