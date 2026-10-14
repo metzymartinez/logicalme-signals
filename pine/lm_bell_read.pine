@@ -4,6 +4,7 @@ indicator("LM Bell Read", overlay = true, max_labels_count = 200)
 // One label after the first bar closes (9:32 on 2m): stack order, MACD read, and YOUR MACD rule.
 // Blue = MACD line, orange = signal line. Needs EXTENDED HOURS ON (reads premarket MACD). Separate from LOD Hunter.
 // Odds measured Mar 9 - Oct 7 2026, SPY, graded on the $1 move from the first bar close.
+// v8j: phone alerts — 999 tag, MACD cross up below 0 (tagged 🎯 if within 45m of the 999 tag), MACD cross down above 0.
 // v8i: bell label adds 🎯 distance to the 999 + tested tag-by-noon odds.
 // v8h: WIDE STACK + fresh VWAP cross up the 200 → label adds '✦ but VWAP crossed 200 ▲' (only 2 days seen: 5/11/26, 10/5/26, both ran up).
 // v8g: VWAP CROSS ▲ flag right at the bell (fresh VWAP-over-200 cross).
@@ -182,6 +183,31 @@ curlUp  = ethOn and hmNow == 630 and barstate.isconfirmed and vw > ma200 and vwR
 //   Tested at the 9:30 bar close (11 days): first $2 up 64% vs 36% down, pullback against ~$0.88. Small sample.
 plotshape(crossBell, "VWAP CROSS ▲ (bell)", shape.labelup, location.belowbar, color.new(#00e5ff, 55), text = "✦ VWAP CROSS ▲\n$2 up first 64%", textcolor = color.white, size = size.tiny, force_overlay = true)
 plotshape(curlUp, "VWAP CURL ▲", shape.labelup, location.belowbar, color.new(#00e5ff, 55), text = "✦ VWAP CURL ▲\n$1 up first 60%", textcolor = color.white, size = size.tiny, force_overlay = true)
+
+
+// ── v8j: PHONE ALERTS (no webhook needed). Create ONE alert on this indicator: "Any alert() function call",
+//   notifications ON, leave Webhook OFF (the server doesn't know these). Fires on bar close, RTH only.
+//   Tested Aug 2025–Oct 2026: buying AT the 999 tag = first $1 up 40% (85 days); waiting for the MACD cross up
+//   after the tag = 46% (28 days). Neither is an edge on its own — these alerts tell you WHEN to look, not to buy.
+doAlerts = input.bool(true, "Phone alerts: 999 tag + MACD crosses")
+var bool tag999 = false
+var int  tagT   = na
+if newDay
+    tag999 := false
+    tagT   := na
+inSess   = hmNow >= 570 and hmNow < 960
+tagNow   = inSess and not tag999 and low <= ma999 and high >= ma999
+if tagNow
+    tag999 := true
+    tagT   := time
+afterTag = tag999 and not na(tagT) and time - tagT <= 45 * 60000
+if doAlerts and barstate.isconfirmed and inSess
+    if tagNow
+        alert("🎯 SPY tagged the 999 at " + str.tostring(ma999, "#.##") + " — watch MACD for the cross", alert.freq_once_per_bar_close)
+    if m < 0 and crUp
+        alert((afterTag ? "🎯 999 + " : "") + "MACD crossed UP below 0 · price " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+    if m > 0 and crDn
+        alert("MACD crossed DOWN above 0 · price " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
 
 // ── scorecard table (corner is a setting; small and see-through)
 posSel = scPos == "bottom right" ? position.bottom_right : scPos == "top left" ? position.top_left : scPos == "middle left" ? position.middle_left : position.bottom_left
