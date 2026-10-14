@@ -4,6 +4,7 @@ indicator("LM Bell Read", overlay = true, max_labels_count = 200)
 // One label after the first bar closes (9:32 on 2m): stack order, MACD read, and YOUR MACD rule.
 // Blue = MACD line, orange = signal line. Needs EXTENDED HOURS ON (reads premarket MACD). Separate from LOD Hunter.
 // Odds measured Mar 9 - Oct 7 2026, SPY, graded on the $1 move from the first bar close.
+// v8l: 🩷 PINK APPLE = MACD below 0 + premarket gap up $1+ (checked before yellow/green).
 // v8k: bell label names the APPLE (MACD below 0): 🟡 YELLOW (999 below) / 🟢 GREEN (999 above) + tested odds by distance.
 // v8j: phone alerts — 999 tag, MACD cross up below 0 (tagged 🎯 if within 45m of the 999 tag), MACD cross down above 0.
 // v8i: bell label adds 🎯 distance to the 999 + tested tag-by-noon odds.
@@ -97,6 +98,14 @@ if pend == 2
         ent := close
         pend := 5
 
+// v8l: premarket gap (first bar of the day vs prior evening close) + premarket high, for the PINK apple
+var float pmGap = na
+var float pmHi  = na
+if newDay
+    pmGap := open - close[1]
+    pmHi  := high
+else if hmNow < 570
+    pmHi  := math.max(nz(pmHi, high), high)
 // VWAP vs 200 (used by the bell label and the VWAP tags)
 vw      = ta.vwap(hlc3)
 vwRise  = vw - vw[n30]
@@ -114,6 +123,12 @@ if isBell
     else if math.abs(mBell) < 0.10 and slope30 < 0
         txt := "MACD ▼ put side · 20/33"
         col := #00e5ff
+    else if mBell < 0 and pmGap >= 1.0
+        // v8l: PINK APPLE = MACD below 0 AND gapped up $1+ in premarket. Tested 46 days: first $1 DOWN 63%
+        //   (no-gap apples 47%); slower — ~48 min to the first $2. If it also faded $1+ off the premarket high: 65% / first $2 down 55% (40d).
+        faded = not na(pmHi) and pmHi - open >= 1.0
+        txt := "🩷 PINK APPLE · gapped up $" + str.tostring(pmGap, "#.##") + "\n" + (faded ? "faded · first $1 DOWN 65% · slow (40d)" : "first $1 DOWN 63% · slow (46d)")
+        col := #ff80ab
     else if mBell <= -0.10
         // v8k: APPLE = MACD below 0 at the bell. YELLOW = 999 below price, GREEN = 999 above price (Metzy's classes).
         //   Tested 5m Aug 2025–Oct 2026, 99 days, first leg from the bell (n per bucket shown).
