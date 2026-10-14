@@ -1,0 +1,195 @@
+//@version=6
+// Core Ratio Levels — auto price/time zones from Daily, Weekly and Quarterly RTH opens.
+// Ratios are in ES points (Izzy-style core ratios). SPY ≈ ES ÷ 10, so Auto scales them.
+// Backtest (SPY daily, Jan 2023–Oct 2026): zones show a small stall edge (~1–2 pts over shifted zones).
+// Directional bias and the "not past X by time Y → retrace" gate showed no edge once distance from open is controlled.
+indicator("Core Ratio Levels", shorttitle = "CoreLvls", overlay = true, max_boxes_count = 300, max_labels_count = 300, max_lines_count = 100)
+
+// ───────────── Inputs
+string grpS = "Scale & session"
+string scaleMode = input.string("Auto", "Point scale", options = ["Auto", "SPY (ES ÷ 10)", "ES / SPX (×1)", "Custom"], group = grpS, tooltip = "Core ratios are in ES points. SPY ≈ ES ÷ 10. Auto uses ×1 when price > 1500, else ÷10.")
+float customScale = input.float(0.1, "Custom multiplier", step = 0.01, group = grpS)
+string sess = input.session("0930-1600", "RTH session (New York)", group = grpS)
+
+string grpA = "Anchors"
+bool  showD = input.bool(true, "Daily open zones", inline = "d", group = grpA)
+color colD  = input.color(#00BCD4, "", inline = "d", group = grpA)
+bool  showW = input.bool(true, "Weekly open zones", inline = "w", group = grpA)
+color colW  = input.color(#FF9800, "", inline = "w", group = grpA)
+bool  showQ = input.bool(false, "Quarterly open zones", inline = "q", group = grpA)
+color colQ  = input.color(#E040FB, "", inline = "q", group = grpA)
+
+string grpV = "Display"
+bool  showLbl = input.bool(true, "Zone labels (right edge)", group = grpV)
+bool  showBrk = input.bool(true, "Mark daily core breaks (close beyond zone)", group = grpV)
+bool  showTbl = input.bool(true, "Anchor table", group = grpV)
+color upCol   = input.color(#26A69A, "Break up", inline = "b", group = grpV)
+color dnCol   = input.color(#EF5350, "Break down", inline = "b", group = grpV)
+
+// ───────────── Core ratio sets (ES points). Tiers go from light/dotted (near) to bold/solid (far).
+var array<float>  dLo = array.from(25.0, 52.0, 72.0, 103.0, 115.0)
+var array<float>  dHi = array.from(29.0, 56.0, 78.0, 110.0, 115.5)
+var array<string> dNm = array.from("Z1", "Z2", "Z3", "Z4", "MAX")
+
+var array<float>  wLo = array.from(52.0, 72.0, 103.0, 115.0, 400.0)
+var array<float>  wHi = array.from(56.0, 78.0, 110.0, 115.5, 426.0)
+var array<string> wNm = array.from("Z2", "Z3", "Z4", "MAX", "DBL")
+
+var array<float>  qLo = array.from(115.0, 345.0, 400.0, 460.0)
+var array<float>  qHi = array.from(115.5, 346.0, 426.0, 463.0)
+var array<string> qNm = array.from("MAX", "Q¼", "DBL", "Q⅓")
+
+float scale = switch scaleMode
+    "SPY (ES ÷ 10)" => 0.1
+    "ES / SPX (×1)" => 1.0
+    "Custom"        => customScale
+    => close > 1500 ? 1.0 : 0.1
+
+// ───────────── Anchor detection (first RTH bar of day / week / quarter)
+string tz = "America/New_York"
+bool inS      = not na(time(timeframe.period, sess, tz))
+bool firstBar = inS and not inS[1]
+int  wk = weekofyear(time, tz)
+int  qt = year(time, tz) * 10 + math.floor((month(time, tz) - 1) / 3)
+
+var int lastWk = na
+var int lastQt = na
+bool newD = firstBar
+bool newW = firstBar and (na(lastWk) or wk != lastWk)
+bool newQ = firstBar and (na(lastQt) or qt != lastQt)
+if firstBar
+    lastWk := wk
+    lastQt := qt
+
+var float dOpen = na
+var float wOpen = na
+var float qOpen = na
+
+// ───────────── Drawing helpers
+var array<box>   dBx = array.new<box>()
+var array<label> dLb = array.new<label>()
+var array<line>  dLn = array.new<line>()
+var array<box>   wBx = array.new<box>()
+var array<label> wLb = array.new<label>()
+var array<line>  wLn = array.new<line>()
+var array<box>   qBx = array.new<box>()
+var array<label> qLb = array.new<label>()
+var array<line>  qLn = array.new<line>()
+
+clearAll(array<box> bxs, array<label> lbs, array<line> lns) =>
+    for b in bxs
+        b.delete()
+    bxs.clear()
+    for l in lbs
+        l.delete()
+    lbs.clear()
+    for ln in lns
+        ln.delete()
+    lns.clear()
+    0
+
+drawZones(array<box> bxs, array<label> lbs, array<line> lns, float anc, array<float> lo, array<float> hi, array<string> nm, color c, string tag, float sc, bool lbl) =>
+    clearAll(bxs, lbs, lns)
+    lns.push(line.new(bar_index, anc, bar_index + 1, anc, color = c, width = 2, extend = extend.right))
+    if lbl
+        lbs.push(label.new(bar_index, anc, tag + " OPEN " + str.tostring(anc, format.mintick), style = label.style_label_left, color = color.new(c, 15), textcolor = color.white, size = size.small))
+    int n = lo.size()
+    for i = 0 to n - 1
+        float a  = lo.get(i) * sc
+        float b  = hi.get(i) * sc
+        int   tr = 88 - math.round(i * 45.0 / math.max(n - 1, 1))
+        int   bw = i == n - 1 ? 2 : 1
+        string st = i < 2 ? line.style_dotted : line.style_solid
+        bxs.push(box.new(bar_index, anc + b, bar_index + 1, anc + a, border_color = color.new(c, 25), border_width = bw, border_style = st, bgcolor = color.new(c, tr), extend = extend.right))
+        bxs.push(box.new(bar_index, anc - a, bar_index + 1, anc - b, border_color = color.new(c, 25), border_width = bw, border_style = st, bgcolor = color.new(c, tr), extend = extend.right))
+        if lbl
+            lbs.push(label.new(bar_index, anc + (a + b) / 2, tag + " +" + nm.get(i) + "  " + str.tostring(anc + a, format.mintick), style = label.style_label_left, color = #00000000, textcolor = c, size = size.tiny))
+            lbs.push(label.new(bar_index, anc - (a + b) / 2, tag + " −" + nm.get(i) + "  " + str.tostring(anc - a, format.mintick), style = label.style_label_left, color = #00000000, textcolor = c, size = size.tiny))
+    0
+
+// ───────────── Set anchors and redraw zones
+if newQ
+    qOpen := open
+    if showQ
+        drawZones(qBx, qLb, qLn, qOpen, qLo, qHi, qNm, colQ, "Q", scale, showLbl)
+if newW
+    wOpen := open
+    if showW
+        drawZones(wBx, wLb, wLn, wOpen, wLo, wHi, wNm, colW, "W", scale, showLbl)
+if newD
+    dOpen := open
+    if showD
+        drawZones(dBx, dLb, dLn, dOpen, dLo, dHi, dNm, colD, "D", scale, showLbl)
+
+// ───────────── Daily core break markers (close beyond a zone's far edge)
+var int dUp = -1
+var int dDn = -1
+if newD
+    dUp := -1
+    dDn := -1
+if showBrk and showD and inS and not na(dOpen)
+    int upNow = -1
+    int dnNow = -1
+    for i = 0 to dHi.size() - 1
+        float edge = dHi.get(i) * scale
+        if close > dOpen + edge
+            upNow := i
+        if close < dOpen - edge
+            dnNow := i
+    if upNow > dUp
+        dUp := upNow
+        label.new(bar_index, high, "▲" + dNm.get(upNow), style = label.style_label_down, color = upCol, textcolor = color.white, size = size.tiny)
+    if dnNow > dDn
+        dDn := dnNow
+        label.new(bar_index, low, "▼" + dNm.get(dnNow), style = label.style_label_up, color = dnCol, textcolor = color.white, size = size.tiny)
+
+// ───────────── Keep labels at the right edge so they don't overlap candles
+if barstate.islast
+    for l in dLb
+        l.set_x(bar_index + 2)
+    for l in wLb
+        l.set_x(bar_index + 12)
+    for l in qLb
+        l.set_x(bar_index + 22)
+
+// ───────────── Bias table
+reached(float anc, array<float> lo, array<string> nm, float sc) =>
+    string r = "inside Z1"
+    if na(anc)
+        r := "—"
+    else
+        float d = close - anc
+        for i = 0 to lo.size() - 1
+            if math.abs(d) >= lo.get(i) * sc
+                r := (d > 0 ? "+" : "−") + nm.get(i)
+    r
+
+vsOpen(float anc) =>
+    na(anc) ? "—" : (close >= anc ? "+" : "") + str.tostring(close - anc, "#.##")
+
+var table tb = table.new(position.top_right, 4, 5, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+
+if showTbl and barstate.islast
+    tb.cell(0, 0, "Anchor", text_color = color.gray, text_size = size.small)
+    tb.cell(1, 0, "Open", text_color = color.gray, text_size = size.small)
+    tb.cell(2, 0, "vs Open", text_color = color.gray, text_size = size.small)
+    tb.cell(3, 0, "Core", text_color = color.gray, text_size = size.small)
+
+    tb.cell(0, 1, "Daily", text_color = colD, text_size = size.small)
+    tb.cell(1, 1, na(dOpen) ? "—" : str.tostring(dOpen, format.mintick), text_color = color.white, text_size = size.small)
+    tb.cell(2, 1, vsOpen(dOpen), text_color = close >= dOpen ? upCol : dnCol, text_size = size.small)
+    tb.cell(3, 1, reached(dOpen, dLo, dNm, scale), text_color = color.white, text_size = size.small)
+
+    tb.cell(0, 2, "Weekly", text_color = colW, text_size = size.small)
+    tb.cell(1, 2, na(wOpen) ? "—" : str.tostring(wOpen, format.mintick), text_color = color.white, text_size = size.small)
+    tb.cell(2, 2, vsOpen(wOpen), text_color = close >= wOpen ? upCol : dnCol, text_size = size.small)
+    tb.cell(3, 2, reached(wOpen, wLo, wNm, scale), text_color = color.white, text_size = size.small)
+
+    tb.cell(0, 3, "Quarterly", text_color = colQ, text_size = size.small)
+    tb.cell(1, 3, na(qOpen) ? "—" : str.tostring(qOpen, format.mintick), text_color = color.white, text_size = size.small)
+    tb.cell(2, 3, vsOpen(qOpen), text_color = close >= qOpen ? upCol : dnCol, text_size = size.small)
+    tb.cell(3, 3, reached(qOpen, qLo, qNm, scale), text_color = color.white, text_size = size.small)
+
+    // Bias row removed: backtest (SPY daily 2023–2026) showed no directional edge.
+    bool maxHit = not na(dOpen) and math.abs(close - dOpen) >= 115.0 * scale
+    tb.cell(0, 4, maxHit ? "D MAX hit" : "", text_color = color.yellow, text_size = size.small)

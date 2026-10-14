@@ -1,0 +1,259 @@
+//@version=6
+indicator("LM Bell Read", overlay = true, max_labels_count = 200)
+
+// One label after the first bar closes (9:32 on 2m): stack order, MACD read, and YOUR MACD rule.
+// Blue = MACD line, orange = signal line. Needs EXTENDED HOURS ON (reads premarket MACD). Separate from LOD Hunter.
+// Odds measured Mar 9 - Oct 7 2026, SPY, graded on the $1 move from the first bar close.
+// v8m: 999 = TRUE 999 EMA (matches orange line); odds re-measured; 🥔 WHITE POTATO (MACD above 0 + 200/999 wide $2+).
+// v8l: 🩷 PINK APPLE = MACD below 0 + premarket gap up $1+ (checked before yellow/green).
+// v8k: bell label names the APPLE (MACD below 0): 🟡 YELLOW (999 below) / 🟢 GREEN (999 above) + tested odds by distance.
+// v8j: phone alerts — 999 tag, MACD cross up below 0 (tagged 🎯 if within 45m of the 999 tag), MACD cross down above 0.
+// v8i: bell label adds 🎯 distance to the 999 + tested tag-by-noon odds.
+// v8h: WIDE STACK + fresh VWAP cross up the 200 → label adds '✦ but VWAP crossed 200 ▲' (only 2 days seen: 5/11/26, 10/5/26, both ran up).
+// v8g: VWAP CROSS ▲ flag right at the bell (fresh VWAP-over-200 cross).
+// v8f: compact glassy bell label + VWAP CURL ▲ flag at 10:30.
+// v8e: glassy ✓ checker on all four MACD crosses (above/below 0 × up/down).
+// v8c: also watches your MACD rules for the first 10 min after the open (setting) and marks the cross candle.
+// v8b (Oct 12 2026) METZY'S RULE: a bull stack counts when the 200 sits CLOSE above the 999.
+//   200 and 999 WIDE apart = WIDE STACK (stretched), NOT a bull day. "Wide" is a setting he sets while testing in Replay.
+//   Label prints the gap and price-to-200 in $ so he can calibrate. Untested as a rule — he is testing it.
+// Scorecard (corner is a setting) grades YOUR rules on every morning loaded on this chart: which came first, $1 your way or $1 against.
+
+tz      = "America/New_York"
+scPos   = input.string("bottom left", "Scorecard corner", options = ["bottom left", "bottom right", "top left", "middle left", "hidden"])
+[m, sg, hist] = ta.macd(close, 12, 26, 9)
+tfMin   = timeframe.in_seconds() / 60.0
+n30     = math.max(1, math.round(30.0 / tfMin))
+n60     = math.max(1, math.round(60.0 / tfMin))
+kx      = math.max(1, math.round(10.0 / tfMin))          // "crossing" = blue crossed orange within the last ~10 min
+hmNow   = hour(time, tz) * 60 + minute(time, tz)
+isBell  = hmNow == 570 and barstate.isconfirmed
+newDay  = dayofmonth(time, tz) != dayofmonth(time[1], tz)
+ethOn   = (time - time[1]) <= timeframe.in_seconds() * 1000 * 2
+
+mBell   = m[1]
+slope30 = m[1] - m[1 + n30]
+climb   = m - ta.lowest(m, n60)
+atr14   = ta.atr(14)
+hh20    = ta.highest(high, 20)
+ma200   = ta.sma(close, 200)
+ma999   = ta.ema(close, 999)     // v8m: TRUE 999 EMA so it matches your orange line (was a 700 EMA)
+wideMin = input.float(2.0, "WIDE = 200 more than this far above 999 ($) → not a bull day", step = 0.25)
+stackUp = close > ma200 and ma200 > ma999
+gap2009 = ma200 - ma999
+bullStk = stackUp and gap2009 <= wideMin
+wideStk = stackUp and gap2009 > wideMin
+bearStk = close < ma200 and ma200 < ma999
+
+f_crossedUp() =>
+    bool hit = false
+    for i = 1 to kx
+        if m[i] <= sg[i]
+            hit := true
+    m > sg and hit
+f_crossedDn() =>
+    bool hit = false
+    for i = 1 to kx
+        if m[i] >= sg[i]
+            hit := true
+    m < sg and hit
+xUp = f_crossedUp()
+xDn = f_crossedDn()
+
+// ── YOUR rules: 1 below0 crossing up -> CALL | 2 below0 end of cycle -> WAIT for put | 3 above0 crossing down -> PUT | 4 above0 crossing up -> CALL
+rule = m < 0 and xUp ? 1 : m < 0 and m > sg and climb >= 0.30 ? 2 : m > 0 and xDn ? 3 : m > 0 and xUp ? 4 : 0
+
+// ── scorecard state
+var int   pend = 0          // rule being graded (5 = rule 2's put, armed after blue crossed under orange)
+var float ent  = na
+var array<int> rightA = array.new_int(5, 0)
+var array<int> wrongA = array.new_int(5, 0)
+
+var bool winFired = false
+if newDay
+    pend := 0
+    winFired := false
+// grade an open read on later bars: first $1 up or $1 down
+if pend == 1 or pend == 3 or pend == 4 or pend == 5
+    cutoff = pend == 5 ? 720 : 660
+    if hmNow >= cutoff
+        pend := 0
+    else
+        up = high - ent >= 1.0
+        dn = ent - low >= 1.0
+        if up != dn
+            wantUp = pend == 1 or pend == 4
+            idx = pend == 5 ? 2 : pend
+            if up == wantUp
+                array.set(rightA, idx, array.get(rightA, idx) + 1)
+            else
+                array.set(wrongA, idx, array.get(wrongA, idx) + 1)
+            pend := 0
+        else if up and dn
+            pend := 0
+// rule 2: WAIT — arm the put when blue crosses under orange (before 10:30)
+if pend == 2
+    if hmNow >= 630
+        pend := 0
+    else if m < sg and m[1] >= sg[1]
+        ent := close
+        pend := 5
+
+// v8l: premarket gap (first bar of the day vs prior evening close) + premarket high, for the PINK apple
+var float pmGap = na
+var float pmHi  = na
+if newDay
+    pmGap := open - close[1]
+    pmHi  := high
+else if hmNow < 570
+    pmHi  := math.max(nz(pmHi, high), high)
+// VWAP vs 200 (used by the bell label and the VWAP tags)
+vw      = ta.vwap(hlc3)
+vwRise  = vw - vw[n30]
+gapVw   = vw - ma200
+gapVw30 = vw[n30] - ma200[n30]
+crossBell = ethOn and isBell and vw > ma200 and vw[n30] <= ma200[n30] and vwRise > 0.20
+
+if isBell
+    // v8f: compact bell read — one short line per read, glassier box
+    string txt = ""
+    color  col = #4dd0e1
+    if not ethOn
+        txt := "needs extended hours ON"
+        col := color.gray
+    else if mBell < 0 and pmGap >= 1.0
+        // v8l: PINK APPLE = MACD below 0 AND gapped up $1+ in premarket. Tested 46 days: first $1 DOWN 63%
+        //   (no-gap apples 47%); slower — ~48 min to the first $2. If it also faded $1+ off the premarket high: 65% / first $2 down 55% (40d).
+        faded = not na(pmHi) and pmHi - open >= 1.0
+        txt := "🩷 PINK APPLE · gapped up $" + str.tostring(pmGap, "#.##") + "\n" + (faded ? "faded · first $1 DOWN 65% · slow (40d)" : "first $1 DOWN 63% · slow (46d)")
+        col := #ff80ab
+    else if mBell > 0 and ma200 - ma999 > 2.0
+        // v8m: WHITE POTATO = MACD above 0 AND 200 & 999 wide ($2+). Tested 5m Aug 2025–Oct 2026, first leg from bell:
+        //   price BELOW the 200 (16d): first $1 UP 69% (the pop), then first $3 DOWN 62%, run dn $4.39 vs up $2.00.
+        //   price above the 200 (57d): about a coin flip.
+        txt := close < ma200 ? "🥔 WHITE POTATO · under the 200\npop first (69%) · then DOWN · $3 dn 62% (16d)" :
+                               "🥔 WHITE POTATO · over the 200\ncoin flip (57d)"
+        col := #e0e0e0
+    else if math.abs(mBell) < 0.10 and slope30 < 0
+        txt := "MACD ▼ put side · 20/33"
+        col := #00e5ff
+    else if mBell <= -0.10
+        // v8k: APPLE = MACD below 0 at the bell. YELLOW = 999 below price, GREEN = 999 above price (Metzy's classes).
+        //   Tested 5m Aug 2025–Oct 2026, 99 days, first leg from the bell (n per bucket shown).
+        dA = math.abs(close - ma999)
+        yel = close > ma999
+        txt := yel ?
+             (dA < 1.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\n79% tag 999 by noon · wait (14d)" :
+              dA < 3.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\nfirst $2 up 50% · dn 36% (14d)" :
+                         "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\nfirst $2 up 59% (22d)") :
+             (dA < 1.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\n60% reach 999 · first $2 down 60% (5d)" :
+              dA < 3.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 down 64% (11d)" :
+                         "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 up 58% (33d)")
+        col := yel ? #ffd600 : #00e676
+    else
+        txt := "MACD 50/50"
+    gapS = " · gap $" + str.tostring(gap2009, "#.#")
+    stk = bullStk ? "▲ BULL STACK" + gapS + "\n" :
+         wideStk and crossBell ? "⚠ WIDE STACK" + gapS + "\n✦ but VWAP crossed 200 ▲ (2 of 2)\n" :
+         wideStk ? "⚠ WIDE STACK" + gapS + "\n" :
+         bearStk ? "▼ BEAR STACK\n" : ""
+    // v8i: distance to the 999 at the bell (classic target). Tested 5m ext-hours Aug 2025–Oct 2026, 190 days price above it:
+    //   (v8m, true 999, 195 days) tagged by noon <$1 83% · $1–2 57% · $2–3 38% · $3–5 21% · $5+ 6%; after a tag the bounce ran ~$2–3.8 (median).
+    //   MACD at the bell did NOT change these odds on wide days, so it is not used here.
+    d999 = close - ma999
+    p999 = d999 < 1 ? "83%" : d999 < 2 ? "57%" : d999 < 3 ? "38%" : d999 < 5 ? "21%" : "6%"
+    t999 = d999 > 0 ? "\n🎯 999 $" + str.tostring(d999, "#.##") + " below · tag by noon " + p999 : "\n🎯 999 $" + str.tostring(-d999, "#.##") + " above"
+    yours = rule == 1 ? "\nR1 ▲ CALL · 8/14" :
+         rule == 2 ? "\nR2 wait put · 0/3" :
+         rule == 3 ? "\nR3 ▼ PUT · 5/6" :
+         rule == 4 ? "\nR4 ▲ CALL · 9/22" : ""
+    if ethOn and rule != 0
+        pend := rule
+        ent  := close
+        winFired := true
+    // parked over the PREMARKET bars (left of the open) so it never sits on the session candles
+    label.new(bar_index - 12, hh20 + 1.5 * atr14, stk + txt + t999 + yours, color = color.new(col, 72), textcolor = color.white,
+         style = label.style_label_down, size = size.small, textalign = text.align_center, force_overlay = true,
+         tooltip = "MACD " + str.tostring(mBell, "#.###") + " · 30-min change " + str.tostring(slope30, "#.###") + " · climbed " + str.tostring(climb, "#.##") + " off its 60-min low · 200–999 gap $" + str.tostring(gap2009, "#.##") + " · price–200 $" + str.tostring(close - ma200, "#.##"))
+
+
+// ── v8c: keep watching YOUR MACD rules for the first 10 minutes after the bell (9:30–9:40).
+// Fires once per day on the candle where blue crosses orange. Graded on the scorecard like the bell read.
+winMin   = input.int(10, "Watch your MACD rules for this many minutes after the open", minval = 0, maxval = 60)
+inWin    = hmNow > 570 and hmNow < 570 + winMin and barstate.isconfirmed
+crUp     = ta.crossover(m, sg)
+crDn     = ta.crossunder(m, sg)
+winRule  = not ethOn or winFired or not inWin ? 0 : m < 0 and crUp ? 1 : m > 0 and crDn ? 3 : m > 0 and crUp ? 4 : 0
+if winRule != 0
+    pend     := winRule
+    ent      := close
+    winFired := true
+plotshape(winRule == 3, "Rule 3 PUT (open window)", shape.labeldown, location.abovebar, color.new(#ff1744, 0), text = "R3\nPUT", textcolor = color.white, size = size.small, force_overlay = true)
+plotshape(winRule == 1, "Rule 1 CALL (open window)", shape.labelup, location.belowbar, color.new(#00c853, 0), text = "R1\nCALL", textcolor = color.white, size = size.small, force_overlay = true)
+plotshape(winRule == 4, "Rule 4 CALL (open window)", shape.labelup, location.belowbar, color.new(#00897b, 0), text = "R4\nCALL", textcolor = color.white, size = size.small, force_overlay = true)
+
+
+// ── v8e: little glassy checker — every MACD cross during the session (9:30–4:00), all four kinds.
+//   PUT side (above the bar):  above 0 cross DOWN = red glass   |  below 0 cross DOWN = pink glass
+//   CALL side (below the bar): below 0 cross UP   = green glass |  above 0 cross UP   = aqua glass
+//   Display only — not graded.
+showChk  = input.bool(true, "Little checker: all four MACD crosses (glassy)")
+inRTH    = hmNow >= 570 and hmNow < 960
+chkA0Dn  = showChk and inRTH and m > 0 and crDn
+chkB0Dn  = showChk and inRTH and m < 0 and crDn
+chkB0Up  = showChk and inRTH and m < 0 and crUp
+chkA0Up  = showChk and inRTH and m > 0 and crUp
+plotshape(chkA0Dn, "✓ above 0 · cross DOWN", shape.labeldown, location.abovebar, color.new(#ff1744, 55), text = "✓", textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(chkB0Dn, "✓ below 0 · cross DOWN", shape.labeldown, location.abovebar, color.new(#f06292, 55), text = "✓", textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(chkB0Up, "✓ below 0 · cross UP",   shape.labelup,   location.belowbar, color.new(#00e676, 55), text = "✓", textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(chkA0Up, "✓ above 0 · cross UP",   shape.labelup,   location.belowbar, color.new(#00e5ff, 55), text = "✓", textcolor = color.white, size = size.tiny, force_overlay = true)
+
+
+// ── v8f: VWAP CURL (call side only). At 10:30: VWAP above the 200, VWAP rising over the last 30 min,
+//   and pulling AWAY from the 200. Tested 5m ext-hours Aug 2025–Oct 2026 (63 days): first $1 up 60% (base 50%),
+//   pullback against ~$1.15 vs ~$1.86 on any day. Put mirror tested: no edge, so not shown.
+curlUp  = ethOn and hmNow == 630 and barstate.isconfirmed and vw > ma200 and vwRise > 0.20 and gapVw > gapVw30
+// v8g: VWAP CROSS ▲ at the BELL — VWAP crossed up through the 200 in the last 30 min and is rising.
+//   Tested at the 9:30 bar close (11 days): first $2 up 64% vs 36% down, pullback against ~$0.88. Small sample.
+plotshape(crossBell, "VWAP CROSS ▲ (bell)", shape.labelup, location.belowbar, color.new(#00e5ff, 55), text = "✦ VWAP CROSS ▲\n$2 up first 64%", textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(curlUp, "VWAP CURL ▲", shape.labelup, location.belowbar, color.new(#00e5ff, 55), text = "✦ VWAP CURL ▲\n$1 up first 60%", textcolor = color.white, size = size.tiny, force_overlay = true)
+
+
+// ── v8j: PHONE ALERTS (no webhook needed). Create ONE alert on this indicator: "Any alert() function call",
+//   notifications ON, leave Webhook OFF (the server doesn't know these). Fires on bar close, RTH only.
+//   Tested Aug 2025–Oct 2026: buying AT the 999 tag = first $1 up 40% (85 days); waiting for the MACD cross up
+//   after the tag = 46% (28 days). Neither is an edge on its own — these alerts tell you WHEN to look, not to buy.
+doAlerts = input.bool(true, "Phone alerts: 999 tag + MACD crosses")
+var bool tag999 = false
+var int  tagT   = na
+if newDay
+    tag999 := false
+    tagT   := na
+inSess   = hmNow >= 570 and hmNow < 960
+tagNow   = inSess and not tag999 and low <= ma999 and high >= ma999
+if tagNow
+    tag999 := true
+    tagT   := time
+afterTag = tag999 and not na(tagT) and time - tagT <= 45 * 60000
+if doAlerts and barstate.isconfirmed and inSess
+    if tagNow
+        alert("🎯 SPY tagged the 999 at " + str.tostring(ma999, "#.##") + " — watch MACD for the cross", alert.freq_once_per_bar_close)
+    if m < 0 and crUp
+        alert((afterTag ? "🎯 999 + " : "") + "MACD crossed UP below 0 · price " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+    if m > 0 and crDn
+        alert("MACD crossed DOWN above 0 · price " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// ── scorecard table (corner is a setting; small and see-through)
+posSel = scPos == "bottom right" ? position.bottom_right : scPos == "top left" ? position.top_left : scPos == "middle left" ? position.middle_left : position.bottom_left
+var table sc = table.new(posSel, 3, 5, border_width = 1, frame_color = color.new(#00e5ff, 50), frame_width = 1)
+f_row(r, name, i) =>
+    table.cell(sc, 0, r, name, text_color = color.white, text_size = size.tiny, bgcolor = color.new(#00e5ff, 88), text_halign = text.align_left)
+    table.cell(sc, 1, r, str.tostring(array.get(rightA, i)) + " right", text_color = color.white, text_size = size.tiny, bgcolor = color.new(#00c853, 82))
+    table.cell(sc, 2, r, str.tostring(array.get(wrongA, i)) + " wrong", text_color = color.white, text_size = size.tiny, bgcolor = color.new(#ff1744, 82))
+if barstate.islast and scPos != "hidden"
+    table.cell(sc, 0, 0, "YOUR MACD RULES · $1 first · this chart", text_color = color.white, text_size = size.tiny, bgcolor = color.new(#00e5ff, 75))
+    table.merge_cells(sc, 0, 0, 2, 0)
+    f_row(1, "below 0 · cross UP → CALL", 1)
+    f_row(2, "below 0 · end of cycle → WAIT put", 2)
+    f_row(3, "above 0 · cross DOWN → PUT", 3)
+    f_row(4, "above 0 · cross UP → CALL", 4)

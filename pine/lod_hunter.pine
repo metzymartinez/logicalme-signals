@@ -1,0 +1,285 @@
+//@version=6
+// Logical Me — LOD Hunter v4.1 (2m SPY)
+// LOD CALL: base break (low holds 3-6 bars, close above hold range). Stop under session low.
+// HOD PUT : quick rejection within 3 bars of a new session high. Stop over session high.
+// PB CALL : new 40m low, pullback >= $2.50 from 60m high, above 200, reclaim bar.
+// v4: webhook alerts (JSON for server.py v18.5); markers use plotshape + force_overlay.
+// v4.1: (a) failed-attempt counters + TREND MODE gate (N failed HODs -> HOD puts go silent for the day;
+//            N failed LODs -> LOD calls go silent). Symmetric: works for gap-and-go AND put-dump days.
+//       (b) CHECK10 alert at 10:00 and RECAP alert at 16:00 carrying "logical data"
+//            (open vs yesterday's range / open-drive, failed counts, trend mode, 200 vs 999 regime, 999 tag time).
+//       Nothing else changed.
+// v4.2: HOD "give-back" trigger. The v4.1 rule (close < low[1] within 3 bars of the high) is blind to spike tops:
+//       after a tall spike bar, low[1] is the base of the spike, so the rejection bars never close under it
+//       (2026-10-08 12:16 spike -> no HOD 2 -> missed $3 leg). Added: within `lookback` bars of the high, if the
+//       bar that made the high has a range >= gbMin, a close back under (high - gbFrac * range) also qualifies.
+//       Replay 36 days (Aug 19 - Oct 8, 2m): adds 3 HOD signals, all 3 ran $1+, 2 hit $2. Nothing else changed.
+indicator("LM LOD Hunter", overlay = true)
+
+// ── Inputs ──
+sessStr  = input.session("0930-1600", "RTH session")
+lodMode  = input.string("Base break", "LOD trigger", options = ["Base break", "Quick reclaim"])
+baseMin  = input.int(3, "Base: min bars since low", minval = 2)
+baseMax  = input.int(6, "Base: max bars since low", minval = 3)
+lookback = input.int(3, "Quick reclaim / HOD: max bars since extreme", minval = 0)
+maxAtt   = input.int(5, "Max attempts per day (per side)", minval = 1)
+stopBuf  = input.float(0.10, "Stop buffer beyond session extreme ($)", minval = 0)
+tgtPts   = input.float(2.0, "Target ($)", minval = 0.1)
+use200L  = input.bool(false, "LOD calls: only above 200 SMA")
+use200S  = input.bool(false, "HOD puts: only below 200 SMA")
+smaLen   = input.int(200, "SMA length")
+doHOD    = input.bool(true, "Hunt high of day (puts)")
+doPB     = input.bool(true, "Pullback reclaim calls (PB CALL)")
+pbDepth  = input.float(2.5, "PB: min pullback from 60m high ($)", minval = 0)
+pbCool   = input.int(10, "PB: cooldown bars", minval = 0)
+sendHook = input.bool(true, "Send webhook alerts (JSON)")
+// v4.1
+trendN   = input.int(2, "Trend mode: failed attempts (one side) to go silent", minval = 1)
+doCheck  = input.bool(true, "Send 10:00 CHECK10 + 16:00 RECAP alerts")
+// v4.2
+doGB     = input.bool(true, "HOD: give-back trigger on spike bars")
+gbMin    = input.float(1.5, "Give-back: min spike-bar range ($)", minval = 0.1)
+gbFrac   = input.float(0.5, "Give-back: fraction of spike range to give back", minval = 0.1, maxval = 1.0)
+
+tz = "America/New_York"
+
+// ── Session ──
+inRTH  = not na(time(timeframe.period, sessStr, tz))
+dayChg = dayofmonth(time, tz) != dayofmonth(time[1], tz)
+newDay = inRTH and (not inRTH[1] or dayChg)
+
+var float sHi = na
+var float sLo = na
+if newDay
+    sHi := high
+    sLo := low
+else if inRTH
+    sHi := math.max(sHi, high)
+    sLo := math.min(sLo, low)
+
+var int barsIn = 0
+barsIn := newDay ? 0 : barsIn + 1
+
+madeLow  = inRTH and low == sLo
+madeHigh = inRTH and high == sHi
+barsLo   = ta.barssince(madeLow)
+barsHi   = ta.barssince(madeHigh)
+sma      = ta.sma(close, smaLen)
+ema999   = ta.ema(close, 999)
+
+// ── v4.1: prior-day range + day state ──
+[pdH, pdL, pdC] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+var float  dOpen     = na
+var bool   openOut   = false   // opened outside yesterday's range
+var bool   reEntered = false   // closed back inside yesterday's range at some point
+var int    failedH   = 0
+var int    failedL   = 0
+var string trendMode = ""      // "UP" (HOD puts silenced) / "DOWN" (LOD calls silenced)
+var string trendAt   = ""
+var string tag999At  = ""
+if newDay
+    dOpen     := open
+    openOut   := open > pdH or open < pdL
+    reEntered := false
+    failedH   := 0
+    failedL   := 0
+    trendMode := ""
+    trendAt   := ""
+    tag999At  := ""
+if inRTH and openOut and not reEntered and close <= pdH and close >= pdL
+    reEntered := true
+if inRTH and tag999At == "" and low <= ema999 and high >= ema999
+    tag999At := str.format_time(time_close, "HH:mm", tz)
+
+openDrive = openOut and not reEntered
+driveDir  = openDrive ? (dOpen > pdH ? "UP" : "DOWN") : ""
+smaUp     = sma > sma[10]
+e999Up    = ema999 > ema999[10]
+regime    = sma > ema999 ? (smaUp and e999Up ? "BULL" : "BULL_FLAT") : (not smaUp and not e999Up ? "BEAR" : "BEAR_FLAT")
+
+// ── LOD trigger ──
+holdLen   = na(barsLo) ? 1 : math.max(1, math.min(barsLo - 1, 10))
+holdHi    = ta.highest(high[1], holdLen)
+baseBreak = not na(barsLo) and barsLo >= baseMin and barsLo <= baseMax and close > holdHi
+quickRec  = barsLo <= lookback and close > high[1]
+lodTrig   = lodMode == "Base break" ? baseBreak : quickRec
+
+// ── v4.2: HOD give-back trigger ──
+var float spikeLo = na                      // low of the bar that set the session high
+if madeHigh
+    spikeLo := low
+spikeRng = sHi - spikeLo
+gbTrig   = doGB and not na(spikeLo) and spikeRng >= gbMin and close < sHi - gbFrac * spikeRng
+hodTrig  = barsHi <= lookback and (close < low[1] or gbTrig)
+
+// ── Trade state ──
+var int    dir           = 0
+var float  stopPx        = na
+var float  tgtPx         = na
+var int    attL          = 0
+var int    attH          = 0
+var int    curAtt        = 0
+var string curSide       = ""
+var float  lastLowTried  = na
+var float  lastHighTried = na
+
+if newDay
+    dir           := 0
+    attL          := 0
+    attH          := 0
+    lastLowTried  := na
+    lastHighTried := na
+
+// ── JSON payload ──
+f_json(string sig, float px, float stp, float tgt, int att, string side) =>
+    '{"signal":"' + sig + '","ticker":"' + syminfo.ticker + '","price":"' + str.tostring(px, format.mintick) +
+     '","time":"' + str.format_time(time_close, "HH:mm", tz) + '","stop":"' + str.tostring(stp, format.mintick) +
+     '","target":"' + str.tostring(tgt, format.mintick) + '","attempt":"' + str.tostring(att) +
+     '","side":"' + side + '","ma200":"' + str.tostring(sma, format.mintick) + '","ma999":"' + str.tostring(ema999, format.mintick) +
+     '","trend_mode":"' + trendMode + '"}'
+
+// v4.1: logical-data payload (CHECK10 / RECAP)
+f_recap(string sig) =>
+    '{"signal":"' + sig + '","ticker":"' + syminfo.ticker + '","time":"' + str.format_time(time_close, "HH:mm", tz) +
+     '","open":"' + str.tostring(dOpen, format.mintick) + '","pd_high":"' + str.tostring(pdH, format.mintick) +
+     '","pd_low":"' + str.tostring(pdL, format.mintick) + '","pd_close":"' + str.tostring(pdC, format.mintick) +
+     '","open_outside":"' + str.tostring(openOut) + '","re_entered":"' + str.tostring(reEntered) +
+     '","open_drive":"' + str.tostring(openDrive) + '","drive_dir":"' + driveDir +
+     '","att_lod":"' + str.tostring(attL) + '","att_hod":"' + str.tostring(attH) +
+     '","failed_lod":"' + str.tostring(failedL) + '","failed_hod":"' + str.tostring(failedH) +
+     '","trend_mode":"' + trendMode + '","trend_at":"' + trendAt + '","trend_n":"' + str.tostring(trendN) +
+     '","regime":"' + regime + '","ma200":"' + str.tostring(sma, format.mintick) + '","ma999":"' + str.tostring(ema999, format.mintick) +
+     '","tag999_at":"' + tag999At + '","sess_high":"' + str.tostring(sHi, format.mintick) + '","sess_low":"' + str.tostring(sLo, format.mintick) +
+     '","close":"' + str.tostring(close, format.mintick) + '"}'
+
+// ── Manage open trade ──
+stopped = false
+hitTgt  = false
+if not newDay and dir != 0
+    if dir == 1
+        if low <= stopPx
+            stopped := true
+        else if high >= tgtPx
+            hitTgt := true
+    else
+        if high >= stopPx
+            stopped := true
+        else if low <= tgtPx
+            hitTgt := true
+    if stopped or hitTgt
+        if sendHook
+            alert(f_json(hitTgt ? "HUNT_TARGET" : "HUNT_STOPPED", hitTgt ? tgtPx : stopPx, stopPx, tgtPx, curAtt, curSide), alert.freq_once_per_bar_close)
+        dir := 0
+    // v4.1: count failures, trip trend mode
+    if stopped
+        if curSide == "HOD"
+            failedH += 1
+            if failedH >= trendN and trendMode == ""
+                trendMode := "UP"
+                trendAt   := str.format_time(time_close, "HH:mm", tz)
+                if sendHook
+                    alert(f_recap("TREND_MODE"), alert.freq_once_per_bar_close)
+        else if curSide == "LOD"
+            failedL += 1
+            if failedL >= trendN and trendMode == ""
+                trendMode := "DOWN"
+                trendAt   := str.format_time(time_close, "HH:mm", tz)
+                if sendHook
+                    alert(f_recap("TREND_MODE"), alert.freq_once_per_bar_close)
+
+// ── Entries (v4.1: gated by trend mode — fades against the trend go silent) ──
+longSig  = inRTH and not newDay and dir == 0 and attL < maxAtt and failedL < trendN and lodTrig and (na(lastLowTried) or sLo < lastLowTried) and (not use200L or close > sma)
+shortSig = doHOD and inRTH and not newDay and dir == 0 and not longSig and attH < maxAtt and failedH < trendN and hodTrig and (na(lastHighTried) or sHi > lastHighTried) and (not use200S or close < sma)
+
+if longSig
+    attL         += 1
+    lastLowTried := sLo
+    dir          := 1
+    stopPx       := sLo - stopBuf
+    tgtPx        := close + tgtPts
+    curAtt       := attL
+    curSide      := "LOD"
+    if sendHook
+        alert(f_json("LOD_CALL", close, stopPx, tgtPx, attL, "LOD"), alert.freq_once_per_bar_close)
+
+if shortSig
+    attH          += 1
+    lastHighTried := sHi
+    dir           := -1
+    stopPx        := sHi + stopBuf
+    tgtPx         := close - tgtPts
+    curAtt        := attH
+    curSide       := "HOD"
+    if sendHook
+        alert(f_json("HOD_PUT", close, stopPx, tgtPx, attH, "HOD"), alert.freq_once_per_bar_close)
+
+// ── Pullback reclaim (independent) ──
+lenLo   = math.max(1, math.min(20, barsIn + 1))
+lenHi   = math.max(1, math.min(30, barsIn + 1))
+lo20    = ta.lowest(low, lenLo)
+hi30    = ta.highest(high, lenHi)
+swingLo = inRTH and low <= lo20
+barsSL  = ta.barssince(swingLo)
+var int   lastPB  = na
+var float pbStop  = na
+var float pbTgt   = na
+var int   pbUntil = na
+pbOK    = na(lastPB) or bar_index - lastPB >= pbCool
+pbSig   = doPB and inRTH and not newDay and barsIn > 2 and barsSL <= 3 and close > high[1] and close > sma and (hi30 - lo20) >= pbDepth and pbOK
+
+if pbSig
+    lastPB  := bar_index
+    pbStop  := lo20 - stopBuf
+    pbTgt   := close + tgtPts
+    pbUntil := bar_index + 30
+    if sendHook
+        alert(f_json("PB_CALL", close, pbStop, pbTgt, 0, "PB"), alert.freq_once_per_bar_close)
+
+pbLive = not na(pbUntil) and bar_index <= pbUntil and not newDay
+
+// ── v4.1: 10:00 check-in + 16:00 recap ──
+hhmmOpen  = str.format_time(time, "HH:mm", tz)
+hhmmClose = str.format_time(time_close, "HH:mm", tz)
+chk10 = doCheck and sendHook and inRTH and hhmmOpen == "10:00"
+recap = doCheck and sendHook and inRTH and hhmmClose == "16:00"
+if chk10
+    alert(f_recap("CHECK10"), alert.freq_once_per_bar_close)
+if recap
+    alert(f_recap("RECAP"), alert.freq_once_per_bar_close)
+
+// ── Plots (all force_overlay so they stay on the candles) ──
+plot(inRTH ? sHi : na, "Session High", color.new(color.orange, 30), style = plot.style_linebr, force_overlay = true)
+plot(inRTH ? sLo : na, "Session Low",  color.new(color.aqua, 30),   style = plot.style_linebr, force_overlay = true)
+plot(use200L or use200S or doPB ? sma : na, "200 SMA", color.new(color.gray, 0), 2, force_overlay = true)
+
+openNow = dir != 0 or stopped or hitTgt
+plot(openNow ? stopPx : na, "Hunt Stop",   color.new(color.red, 0),  1, plot.style_linebr, force_overlay = true)
+plot(openNow ? tgtPx  : na, "Hunt Target", color.new(color.lime, 0), 1, plot.style_linebr, force_overlay = true)
+plot(pbLive ? pbStop : na, "PB Stop",   color.new(color.red, 40),  1, plot.style_linebr, force_overlay = true)
+plot(pbLive ? pbTgt  : na, "PB Target", color.new(color.teal, 20), 1, plot.style_linebr, force_overlay = true)
+
+// v4.4: colors are fixed values so YOU can still pick them in Style (an input-based glass setting hid the pickers).
+// v4.4: all labels glassy — calls in aqua glass, puts in red glass, white sparkle text, tiny size. Logic + alerts unchanged.
+plotshape(longSig and attL == 1, "LOD 1",  shape.labelup, location.belowbar, color.new(#00e5ff, 45), text = "✦LOD 1",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(longSig and attL == 2, "LOD 2",  shape.labelup, location.belowbar, color.new(#00e5ff, 45), text = "✦LOD 2",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(longSig and attL == 3, "LOD 3",  shape.labelup, location.belowbar, color.new(#00e5ff, 45), text = "✦LOD 3",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(longSig and attL == 4, "LOD 4",  shape.labelup, location.belowbar, color.new(#00e5ff, 45), text = "✦LOD 4",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(longSig and attL >= 5, "LOD 5+", shape.labelup, location.belowbar, color.new(#00e5ff, 45), text = "✦LOD 5+", textcolor = color.white, size = size.tiny, force_overlay = true)
+
+plotshape(shortSig and attH == 1, "HOD 1",  shape.labeldown, location.abovebar, color.new(#ff1744, 45), text = "✦HOD 1",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(shortSig and attH == 2, "HOD 2",  shape.labeldown, location.abovebar, color.new(#ff1744, 45), text = "✦HOD 2",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(shortSig and attH == 3, "HOD 3",  shape.labeldown, location.abovebar, color.new(#ff1744, 45), text = "✦HOD 3",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(shortSig and attH == 4, "HOD 4",  shape.labeldown, location.abovebar, color.new(#ff1744, 45), text = "✦HOD 4",  textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(shortSig and attH >= 5, "HOD 5+", shape.labeldown, location.abovebar, color.new(#ff1744, 45), text = "✦HOD 5+", textcolor = color.white, size = size.tiny, force_overlay = true)
+
+plotshape(pbSig, "PB CALL", shape.labelup, location.belowbar, color.new(#00e5ff, 45), text = "✧PB", textcolor = color.white, size = size.tiny, force_overlay = true)
+
+plotchar(hitTgt,  "Target hit", "✓", location.abovebar, color.new(#00e5ff, 10), size = size.tiny, force_overlay = true)
+plotchar(stopped, "Stopped",    "✕", location.belowbar, color.new(#ff1744, 10), size = size.tiny, force_overlay = true)
+
+// v4.1: trend-mode marker (fires once, on the bar the gate trips)
+// v4.3/4.4: TREND tags glassy (aqua UP under the bar, red DOWN over the bar), same glass setting as all labels.
+trendTrip = trendMode != "" and trendMode[1] == ""
+plotshape(trendTrip and trendMode == "UP",   "TREND UP",   shape.labelup,   location.belowbar, color.new(#00e5ff, 45), text = "✦TREND▲",   textcolor = color.white, size = size.tiny, force_overlay = true)
+plotshape(trendTrip and trendMode == "DOWN", "TREND DOWN", shape.labeldown, location.abovebar, color.new(#ff1744, 45), text = "✦TREND▼", textcolor = color.white, size = size.tiny, force_overlay = true)
