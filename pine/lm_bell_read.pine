@@ -4,6 +4,7 @@ indicator("LM Bell Read", overlay = true, max_labels_count = 200)
 // One label after the first bar closes (9:32 on 2m): stack order, MACD read, and YOUR MACD rule.
 // Blue = MACD line, orange = signal line. Needs EXTENDED HOURS ON (reads premarket MACD). Separate from LOD Hunter.
 // Odds measured Mar 9 - Oct 7 2026, SPY, graded on the $1 move from the first bar close.
+// v8m: 999 = TRUE 999 EMA (matches orange line); odds re-measured; 🥔 WHITE POTATO (MACD above 0 + 200/999 wide $2+).
 // v8l: 🩷 PINK APPLE = MACD below 0 + premarket gap up $1+ (checked before yellow/green).
 // v8k: bell label names the APPLE (MACD below 0): 🟡 YELLOW (999 below) / 🟢 GREEN (999 above) + tested odds by distance.
 // v8j: phone alerts — 999 tag, MACD cross up below 0 (tagged 🎯 if within 45m of the 999 tag), MACD cross down above 0.
@@ -36,7 +37,7 @@ climb   = m - ta.lowest(m, n60)
 atr14   = ta.atr(14)
 hh20    = ta.highest(high, 20)
 ma200   = ta.sma(close, 200)
-ma999   = ta.ema(close, 700)     // your orange "999" line is a 700 EMA
+ma999   = ta.ema(close, 999)     // v8m: TRUE 999 EMA so it matches your orange line (was a 700 EMA)
 wideMin = input.float(2.0, "WIDE = 200 more than this far above 999 ($) → not a bull day", step = 0.25)
 stackUp = close > ma200 and ma200 > ma999
 gap2009 = ma200 - ma999
@@ -126,6 +127,13 @@ if isBell
         faded = not na(pmHi) and pmHi - open >= 1.0
         txt := "🩷 PINK APPLE · gapped up $" + str.tostring(pmGap, "#.##") + "\n" + (faded ? "faded · first $1 DOWN 65% · slow (40d)" : "first $1 DOWN 63% · slow (46d)")
         col := #ff80ab
+    else if mBell > 0 and ma200 - ma999 > 2.0
+        // v8m: WHITE POTATO = MACD above 0 AND 200 & 999 wide ($2+). Tested 5m Aug 2025–Oct 2026, first leg from bell:
+        //   price BELOW the 200 (16d): first $1 UP 69% (the pop), then first $3 DOWN 62%, run dn $4.39 vs up $2.00.
+        //   price above the 200 (57d): about a coin flip.
+        txt := close < ma200 ? "🥔 WHITE POTATO · under the 200\npop first (69%) · then DOWN · $3 dn 62% (16d)" :
+                               "🥔 WHITE POTATO · over the 200\ncoin flip (57d)"
+        col := #e0e0e0
     else if math.abs(mBell) < 0.10 and slope30 < 0
         txt := "MACD ▼ put side · 20/33"
         col := #00e5ff
@@ -135,12 +143,12 @@ if isBell
         dA = math.abs(close - ma999)
         yel = close > ma999
         txt := yel ?
-             (dA < 1.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\n85% tag 999 by noon · wait (13d)" :
-              dA < 3.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\nfirst $2 up 58% (19d)" :
-                         "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\n50/50 (14d)") :
-             (dA < 1.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\n71% reach 999 · first $2 down 57% (14d)" :
-              dA < 3.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 down 75% (8d)" :
-                         "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 up 61% (31d)")
+             (dA < 1.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\n79% tag 999 by noon · wait (14d)" :
+              dA < 3.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\nfirst $2 up 50% · dn 36% (14d)" :
+                         "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\nfirst $2 up 59% (22d)") :
+             (dA < 1.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\n60% reach 999 · first $2 down 60% (5d)" :
+              dA < 3.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 down 64% (11d)" :
+                         "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 up 58% (33d)")
         col := yel ? #ffd600 : #00e676
     else
         txt := "MACD 50/50"
@@ -150,10 +158,10 @@ if isBell
          wideStk ? "⚠ WIDE STACK" + gapS + "\n" :
          bearStk ? "▼ BEAR STACK\n" : ""
     // v8i: distance to the 999 at the bell (classic target). Tested 5m ext-hours Aug 2025–Oct 2026, 190 days price above it:
-    //   tagged by noon <$1 93% · $1–2 59% · $2–3 43% · $3–5 14% · $5+ 10%; after a tag the bounce ran ~$2–3.8 (median).
+    //   (v8m, true 999, 195 days) tagged by noon <$1 83% · $1–2 57% · $2–3 38% · $3–5 21% · $5+ 6%; after a tag the bounce ran ~$2–3.8 (median).
     //   MACD at the bell did NOT change these odds on wide days, so it is not used here.
     d999 = close - ma999
-    p999 = d999 < 1 ? "93%" : d999 < 2 ? "59%" : d999 < 3 ? "43%" : d999 < 5 ? "14%" : "10%"
+    p999 = d999 < 1 ? "83%" : d999 < 2 ? "57%" : d999 < 3 ? "38%" : d999 < 5 ? "21%" : "6%"
     t999 = d999 > 0 ? "\n🎯 999 $" + str.tostring(d999, "#.##") + " below · tag by noon " + p999 : "\n🎯 999 $" + str.tostring(-d999, "#.##") + " above"
     yours = rule == 1 ? "\nR1 ▲ CALL · 8/14" :
          rule == 2 ? "\nR2 wait put · 0/3" :
