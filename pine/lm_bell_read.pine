@@ -4,6 +4,7 @@ indicator("LM Bell Read", overlay = true, max_labels_count = 200)
 // One label after the first bar closes (9:32 on 2m): stack order, MACD read, and YOUR MACD rule.
 // Blue = MACD line, orange = signal line. Needs EXTENDED HOURS ON (reads premarket MACD). Separate from LOD Hunter.
 // Odds measured Mar 9 - Oct 7 2026, SPY, graded on the $1 move from the first bar close.
+// v8i: bell label adds 🎯 distance to the 999 + tested tag-by-noon odds.
 // v8h: WIDE STACK + fresh VWAP cross up the 200 → label adds '✦ but VWAP crossed 200 ▲' (only 2 days seen: 5/11/26, 10/5/26, both ran up).
 // v8g: VWAP CROSS ▲ flag right at the bell (fresh VWAP-over-200 cross).
 // v8f: compact glassy bell label + VWAP CURL ▲ flag at 10:30.
@@ -121,6 +122,12 @@ if isBell
          wideStk and crossBell ? "⚠ WIDE STACK" + gapS + "\n✦ but VWAP crossed 200 ▲ (2 of 2)\n" :
          wideStk ? "⚠ WIDE STACK" + gapS + "\n" :
          bearStk ? "▼ BEAR STACK\n" : ""
+    // v8i: distance to the 999 at the bell (classic target). Tested 5m ext-hours Aug 2025–Oct 2026, 190 days price above it:
+    //   tagged by noon <$1 93% · $1–2 59% · $2–3 43% · $3–5 14% · $5+ 10%; after a tag the bounce ran ~$2–3.8 (median).
+    //   MACD at the bell did NOT change these odds on wide days, so it is not used here.
+    d999 = close - ma999
+    p999 = d999 < 1 ? "93%" : d999 < 2 ? "59%" : d999 < 3 ? "43%" : d999 < 5 ? "14%" : "10%"
+    t999 = d999 > 0 ? "\n🎯 999 $" + str.tostring(d999, "#.##") + " below · tag by noon " + p999 : "\n🎯 999 $" + str.tostring(-d999, "#.##") + " above"
     yours = rule == 1 ? "\nR1 ▲ CALL · 8/14" :
          rule == 2 ? "\nR2 wait put · 0/3" :
          rule == 3 ? "\nR3 ▼ PUT · 5/6" :
@@ -130,7 +137,7 @@ if isBell
         ent  := close
         winFired := true
     // parked over the PREMARKET bars (left of the open) so it never sits on the session candles
-    label.new(bar_index - 12, hh20 + 1.5 * atr14, stk + txt + yours, color = color.new(col, 72), textcolor = color.white,
+    label.new(bar_index - 12, hh20 + 1.5 * atr14, stk + txt + t999 + yours, color = color.new(col, 72), textcolor = color.white,
          style = label.style_label_down, size = size.small, textalign = text.align_center, force_overlay = true,
          tooltip = "MACD " + str.tostring(mBell, "#.###") + " · 30-min change " + str.tostring(slope30, "#.###") + " · climbed " + str.tostring(climb, "#.##") + " off its 60-min low · 200–999 gap $" + str.tostring(gap2009, "#.##") + " · price–200 $" + str.tostring(close - ma200, "#.##"))
 
