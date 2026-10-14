@@ -4,6 +4,7 @@ indicator("LM Bell Read", overlay = true, max_labels_count = 200)
 // One label after the first bar closes (9:32 on 2m): stack order, MACD read, and YOUR MACD rule.
 // Blue = MACD line, orange = signal line. Needs EXTENDED HOURS ON (reads premarket MACD). Separate from LOD Hunter.
 // Odds measured Mar 9 - Oct 7 2026, SPY, graded on the $1 move from the first bar close.
+// v8k: bell label names the APPLE (MACD below 0): 🟡 YELLOW (999 below) / 🟢 GREEN (999 above) + tested odds by distance.
 // v8j: phone alerts — 999 tag, MACD cross up below 0 (tagged 🎯 if within 45m of the 999 tag), MACD cross down above 0.
 // v8i: bell label adds 🎯 distance to the 999 + tested tag-by-noon odds.
 // v8h: WIDE STACK + fresh VWAP cross up the 200 → label adds '✦ but VWAP crossed 200 ▲' (only 2 days seen: 5/11/26, 10/5/26, both ran up).
@@ -114,8 +115,18 @@ if isBell
         txt := "MACD ▼ put side · 20/33"
         col := #00e5ff
     else if mBell <= -0.10
-        txt := "MACD ▲ call side · 22/36"
-        col := #1de9b6
+        // v8k: APPLE = MACD below 0 at the bell. YELLOW = 999 below price, GREEN = 999 above price (Metzy's classes).
+        //   Tested 5m Aug 2025–Oct 2026, 99 days, first leg from the bell (n per bucket shown).
+        dA = math.abs(close - ma999)
+        yel = close > ma999
+        txt := yel ?
+             (dA < 1.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\n85% tag 999 by noon · wait (13d)" :
+              dA < 3.5 ? "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\nfirst $2 up 58% (19d)" :
+                         "🟡 YELLOW APPLE · 999 $" + str.tostring(dA, "#.##") + " below\n50/50 (14d)") :
+             (dA < 1.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\n71% reach 999 · first $2 down 57% (14d)" :
+              dA < 3.5 ? "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 down 75% (8d)" :
+                         "🟢 GREEN APPLE · 999 $" + str.tostring(dA, "#.##") + " above\nfirst $2 up 61% (31d)")
+        col := yel ? #ffd600 : #00e676
     else
         txt := "MACD 50/50"
     gapS = " · gap $" + str.tostring(gap2009, "#.#")
